@@ -10,8 +10,8 @@
 
     "nvidia_driver": {
       "label": "NVIDIA GPU Driver",
-      "approved_version": "572.83",
-      "minimum_version": "560.00",
+      "approved_version": "610.62",
+      "minimum_version": "610.62",
       "update_url": "https://www.nvidia.com/en-us/drivers/",
       "notes": "Approved after vetting for iRacing + ACC stability. Do not update to 576.x until further notice.",
       "check_method": "nvidia_smi"
