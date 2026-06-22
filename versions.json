@@ -1,7 +1,7 @@
 {
   "_meta": {
     "schema_version": "2.0",
-    "last_updated": "2026-06-16",
+    "last_updated": "2026-06-22",
     "updated_by": "Podium 1 Racing",
     "notes": "Approved versions for all Podium 1 sim rigs. Update this file to push new approved versions fleet-wide."
   },
@@ -13,14 +13,14 @@
       "approved_version": "610.62",
       "minimum_version": "610.62",
       "update_url": "https://www.nvidia.com/en-us/drivers/",
-      "notes": "Approved after vetting for iRacing + ACC stability. Do not update to 576.x until further notice.",
+      "notes": "Approved after vetting for iRacing + ACC stability.",
       "check_method": "nvidia_smi"
     },
 
     "windows_update": {
       "label": "Windows Update",
       "policy": "auto",
-      "notes": "All pending Windows updates should be applied. Red if more than 7 days overdue.",
+      "notes": "All pending Windows updates should be applied.",
       "check_method": "wua_api"
     },
 
@@ -48,16 +48,14 @@
       "notes": "Registry stores exe path under HKCU. Version read directly from exe."
     },
 
-    "simucube_truedrive": {
-      "label": "Simucube True Drive",
-      "approved_version": "2025.3",
-      "minimum_version": "2024.12",
-      "exe_name": "TrueDrive.exe",
-      "registry_key": "HKLM\\SOFTWARE\\Granite Devices\\TrueDrive",
-      "registry_value": "Version",
-      "install_path_hint": "C:\\Program Files\\Granite Devices\\TrueDrive",
-      "update_url": "https://www.simucu.be/truedrive",
-      "notes": ""
+    "simucube_tuner": {
+      "label": "Simucube Tuner",
+      "approved_version": "3.1.3",
+      "minimum_version": "3.1.3",
+      "exe_name": "sc-tuner.exe",
+      "install_path_hint": "C:\\Program Files\\SimucubeTuner",
+      "update_url": "https://www.simucu.be/tuner",
+      "notes": "Version read from version file in install directory."
     },
 
     "heusinkveld_app": {
@@ -143,7 +141,7 @@
       "components": [
         "nvidia_driver",
         "windows_update",
-        "simucube_truedrive",
+        "simucube_tuner",
         "simhub"
       ]
     },
@@ -172,7 +170,7 @@
       "components": [
         "nvidia_driver",
         "windows_update",
-        "simucube_truedrive",
+        "simucube_tuner",
         "heusinkveld_app",
         "simhub"
       ]
