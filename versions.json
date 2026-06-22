@@ -1,336 +1,220 @@
-"""
-PitStop — Startup Installer
-============================
-Registers PitStop.exe to launch at Windows startup and writes the
-rig profile + optional add-ons to the app config file.
+{
+  "_meta": {
+    "schema_version": "2.0",
+    "last_updated": "2026-06-22",
+    "updated_by": "Podium 1 Racing",
+    "notes": "Approved versions for all Podium 1 sim rigs. Update this file to push new approved versions fleet-wide."
+  },
 
-Usage:
-    python install_startup.py --profile asetek-build
-    python install_startup.py --profile moza-simucube-pedals-build --addons streamdeck
+  "components": {
 
-Valid profiles:
-    dev
+    "nvidia_driver": {
+      "label": "NVIDIA GPU Driver",
+      "approved_version": "610.62",
+      "minimum_version": "610.62",
+      "update_url": "https://www.nvidia.com/en-us/drivers/",
+      "notes": "Approved after vetting for iRacing + ACC stability.",
+      "check_method": "nvidia_smi"
+    },
 
-    -- Asetek wheelbase --
-    asetek-build                    (Asetek + Heusinkveld pedals)
-    asetek-moza-pedals-build        (Asetek + MOZA pedals)
-    asetek-simucube-pedals-build    (Asetek + Simucube Active Pedals)
+    "windows_update": {
+      "label": "Windows Update",
+      "policy": "auto",
+      "notes": "All pending Windows updates should be applied.",
+      "check_method": "wua_api"
+    },
 
-    -- MOZA wheelbase --
-    moza-build                      (MOZA wheelbase + MOZA pedals)
-    moza-heusinkveld-build          (MOZA + Heusinkveld pedals)
-    moza-simucube-pedals-build      (MOZA + Simucube Active Pedals)
+    "asetek_racehub": {
+      "label": "Asetek RaceHub",
+      "approved_version": "1.6.2",
+      "minimum_version": "1.5.0",
+      "exe_name": "RaceHub.exe",
+      "registry_key": "HKLM\\SOFTWARE\\Asetek\\RaceHub",
+      "registry_value": "Version",
+      "install_path_hint": "C:\\Program Files\\Asetek\\RaceHub",
+      "update_url": "https://www.asetek.com/simsports/racehub/",
+      "notes": ""
+    },
 
-    -- Simucube wheelbase --
-    simucube-build                  (Simucube wheelbase + Simucube pedals)
-    simucube-heusinkveld-build      (Simucube + Heusinkveld pedals)
-    simucube-moza-pedals-build      (Simucube + MOZA pedals)
+    "moza_pithouse": {
+      "label": "MOZA Pit House",
+      "approved_version": "1.3.9.36",
+      "minimum_version": "1.3.9.36",
+      "exe_name": "MOZA Pit House.exe",
+      "registry_key": "HKCU\\SOFTWARE\\MOZA\\PitHouse",
+      "registry_value": "path",
+      "install_path_hint": "C:\\Program Files (x86)\\MOZA Pit House\\bin",
+      "update_url": "C:\\Program Files (x86)\\MOZA Pit House\\bin\\MOZA Pit House.exe",
+      "notes": "Registry stores exe path under HKCU. Version read directly from exe. Also covers MOZA pedals."
+    },
 
-    -- Fanatec wheelbase --
-    fanatec-build                   (Fanatec + Heusinkveld pedals)
-    fanatec-moza-pedals-build       (Fanatec + MOZA pedals)
-    fanatec-simucube-pedals-build   (Fanatec + Simucube Active Pedals)
+    "simucube_tuner": {
+      "label": "Simucube Tuner",
+      "approved_version": "3.1.3",
+      "minimum_version": "3.1.3",
+      "exe_name": "sc-tuner.exe",
+      "install_path_hint": "C:\\Program Files\\SimucubeTuner",
+      "update_url": "https://www.simucu.be/tuner",
+      "notes": "Version read from version file in install directory. Covers Simucube wheelbase and Active Pedals."
+    },
 
-Valid add-ons:
-    streamdeck
-    sensit
-"""
+    "fanatec_app": {
+      "label": "Fanatec App",
+      "approved_version": "1.5.1.2",
+      "minimum_version": "1.5.0.0",
+      "exe_name": "Fanatec.exe",
+      "install_path_hint": "C:\\Program Files\\Fanatec\\FanatecUI\\UI",
+      "update_url": "https://www.fanatec.com/us/en/s/download-apps-driver",
+      "notes": "Version read from exe. Required for all Fanatec hardware."
+    },
 
-import argparse
-import json
-import os
-import sys
-import winreg
-from pathlib import Path
+    "heusinkveld_app": {
+      "label": "Heusinkveld App",
+      "approved_version": "3.8.1",
+      "minimum_version": "3.7.0",
+      "exe_name": "HeusinkveldApp.exe",
+      "registry_key": "HKLM\\SOFTWARE\\Heusinkveld\\HeusinkveldApp",
+      "registry_value": "Version",
+      "install_path_hint": "C:\\Program Files\\Heusinkveld",
+      "update_url": "https://heusinkveld.com/smartcontrol/",
+      "notes": ""
+    },
 
+    "simhub": {
+      "label": "SimHub",
+      "approved_version": "9.4.2",
+      "minimum_version": "9.0.0",
+      "exe_name": "SimHubWPF.exe",
+      "registry_key": "HKLM\\SOFTWARE\\SimHub",
+      "registry_value": "Version",
+      "install_path_hint": "C:\\Program Files (x86)\\SimHub",
+      "update_url": "https://www.simhubdash.com/",
+      "notes": ""
+    },
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
+    "streamdeck": {
+      "label": "Stream Deck",
+      "optional": true,
+      "approved_version": "6.8.0",
+      "minimum_version": "6.5.0",
+      "exe_name": "StreamDeck.exe",
+      "registry_key": "HKLM\\SOFTWARE\\Elgato Systems GmbH\\StreamDeck",
+      "registry_value": "Version",
+      "install_path_hint": "C:\\Program Files\\Elgato\\StreamDeck",
+      "update_url": "https://www.elgato.com/downloads",
+      "notes": "Optional add-on. Only checked on rigs where installed."
+    },
 
-VALID_PROFILES = [
-    "dev",
-    # Asetek wheelbase
-    "asetek-build",
-    "asetek-moza-pedals-build",
-    "asetek-simucube-pedals-build",
-    # MOZA wheelbase
-    "moza-build",
-    "moza-heusinkveld-build",
-    "moza-simucube-pedals-build",
-    # Simucube wheelbase
-    "simucube-build",
-    "simucube-heusinkveld-build",
-    "simucube-moza-pedals-build",
-    # Fanatec wheelbase
-    "fanatec-build",
-    "fanatec-moza-pedals-build",
-    "fanatec-simucube-pedals-build",
-]
-
-VALID_ADDONS = ["streamdeck", "sensit"]
-
-APP_NAME    = "PitStop"
-APP_DIR     = Path(os.getenv("APPDATA")) / "Podium1" / "PitStop"
-CONFIG_FILE = APP_DIR / "config.json"
-
-# Startup registry key (per-user, no admin needed)
-STARTUP_REG_KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def resolve_exe() -> Path:
-    """
-    Find PitStop.exe relative to this script.
-    Works whether run from the source tree (dist/PitStop.exe)
-    or from an already-extracted PyInstaller bundle (same directory).
-    """
-    candidates = [
-        Path(sys.executable).parent / "PitStop.exe",   # bundled alongside installer
-        Path(__file__).parent / "dist" / "PitStop.exe", # dev tree after pyinstaller build
-        Path(__file__).parent / "PitStop.exe",           # flat layout
-    ]
-    for c in candidates:
-        if c.exists():
-            return c.resolve()
-    return candidates[1]   # return the expected path even if not yet built
-
-
-def write_config(profile: str, addons: list[str]):
-    APP_DIR.mkdir(parents=True, exist_ok=True)
-    cfg = {
-        "profile": profile,
-        "addons":  addons,
-        "installed_at": str(Path(__file__).resolve()),
+    "sensit_haptics": {
+      "label": "Sensit Seat Haptics",
+      "optional": true,
+      "approved_version": "2.1.0",
+      "minimum_version": "2.0.0",
+      "exe_name": "SensitApp.exe",
+      "registry_key": "HKLM\\SOFTWARE\\Sensit\\SensitApp",
+      "registry_value": "Version",
+      "install_path_hint": "C:\\Program Files\\Sensit",
+      "update_url": "https://sensithaptics.com/pages/downloads",
+      "notes": "Optional add-on. Only checked on rigs where installed."
     }
-    CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
-    print(f"  Config written to: {CONFIG_FILE}")
 
+  },
 
-def register_startup(exe_path: Path):
-    """Add PitStop.exe to HKCU Run key so it starts with Windows."""
-    try:
-        with winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            STARTUP_REG_KEY,
-            0,
-            winreg.KEY_SET_VALUE,
-        ) as key:
-            winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, f'"{exe_path}"')
-        print(f"  Startup registry entry set: {exe_path}")
-        return True
-    except Exception as exc:
-        print(f"  WARNING: Could not write startup registry key: {exc}")
-        print(f"  You can manually add: {exe_path}")
-        return False
+  "profiles": {
 
+    "dev": {
+      "label": "Dev Machine",
+      "components": ["nvidia_driver", "windows_update"]
+    },
 
-def unregister_startup():
-    """Remove PitStop from startup (useful for clean reinstall)."""
-    try:
-        with winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            STARTUP_REG_KEY,
-            0,
-            winreg.KEY_SET_VALUE,
-        ) as key:
-            winreg.DeleteValue(key, APP_NAME)
-        print("  Removed existing startup entry.")
-    except FileNotFoundError:
-        pass
-    except Exception as exc:
-        print(f"  Warning removing startup entry: {exc}")
+    "all-apps-build": {
+      "label": "All Apps Test",
+      "components": [
+        "nvidia_driver",
+        "windows_update",
+        "asetek_racehub",
+        "moza_pithouse",
+        "simucube_tuner",
+        "fanatec_app",
+        "heusinkveld_app",
+        "simhub",
+        "streamdeck",
+        "sensit_haptics"
+      ]
+    },
 
+    "asetek-build": {
+      "label": "Asetek + Heusinkveld",
+      "components": ["nvidia_driver", "windows_update", "asetek_racehub", "heusinkveld_app", "simhub"]
+    },
 
-def unblock_exe(exe_path: Path):
-    """
-    Remove the Zone.Identifier alternate data stream that Windows attaches
-    to downloaded files, and add the exe to the Windows Security exclusions
-    so Smart App Control / Defender does not block it.
-    """
-    # Step 1: Unblock the file (removes the "downloaded from internet" flag)
-    try:
-        import subprocess
-        subprocess.run(
-            ["powershell", "-NonInteractive", "-NoProfile", "-command",
-             f"Unblock-File -Path '{exe_path}'"],
-            timeout=10, check=True
-        )
-        print(f"  File unblocked: {exe_path}")
-    except Exception as exc:
-        print(f"  Note: Could not unblock file: {exc}")
+    "asetek-moza-pedals-build": {
+      "label": "Asetek + MOZA Pedals",
+      "components": ["nvidia_driver", "windows_update", "asetek_racehub", "moza_pithouse", "simhub"]
+    },
 
-    # Step 2: Add exe folder to Windows Defender exclusions
-    # This prevents Smart App Control from interfering on future launches
-    try:
-        exe_dir = str(exe_path.parent)
-        subprocess.run(
-            ["powershell", "-NonInteractive", "-NoProfile", "-command",
-             f"Add-MpPreference -ExclusionPath '{exe_dir}'"],
-            timeout=15, check=True
-        )
-        print(f"  Windows Security exclusion added: {exe_dir}")
-    except Exception as exc:
-        print(f"  Note: Could not add Windows Security exclusion: {exc}")
-        print(f"  You may need to add manually: Settings > Windows Security > Exclusions")
+    "asetek-simucube-pedals-build": {
+      "label": "Asetek + Simucube Pedals",
+      "components": ["nvidia_driver", "windows_update", "asetek_racehub", "simucube_tuner", "simhub"]
+    },
 
+    "moza-build": {
+      "label": "MOZA Wheelbase + Pedals",
+      "components": ["nvidia_driver", "windows_update", "moza_pithouse", "simhub"]
+    },
 
-def disable_smart_app_control():
-    """
-    Disable Windows Smart App Control so PitStop can launch without being blocked.
-    Smart App Control is a consumer feature not appropriate for managed business rigs.
-    Requires admin rights.
-    """
-    import subprocess
-    try:
-        subprocess.run(
-            ["powershell", "-NonInteractive", "-NoProfile", "-command",
-             r"Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy' "
-             "-Name 'VerifiedAndReputablePolicyState' -Value 0 -Force"],
-            timeout=15, check=True
-        )
-        print("  Smart App Control disabled.")
-    except Exception as exc:
-        print(f"  Note: Could not disable Smart App Control: {exc}")
+    "moza-heusinkveld-build": {
+      "label": "MOZA + Heusinkveld",
+      "components": ["nvidia_driver", "windows_update", "moza_pithouse", "heusinkveld_app", "simhub"]
+    },
 
-    # Also disable via the SmartScreen registry key as a second layer
-    try:
-        import winreg
-        with winreg.OpenKey(
-            winreg.HKEY_LOCAL_MACHINE,
-            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer",
-            0,
-            winreg.KEY_SET_VALUE,
-        ) as key:
-            winreg.SetValueEx(key, "SmartScreenEnabled", 0, winreg.REG_SZ, "Off")
-        print("  SmartScreen policy set to off.")
-    except Exception as exc:
-        print(f"  Note: Could not set SmartScreen policy: {exc}")
+    "moza-simucube-pedals-build": {
+      "label": "MOZA + Simucube Pedals",
+      "components": ["nvidia_driver", "windows_update", "moza_pithouse", "simucube_tuner", "simhub"]
+    },
 
+    "simucube-build": {
+      "label": "Simucube Wheelbase + Pedals",
+      "components": ["nvidia_driver", "windows_update", "simucube_tuner", "simhub"]
+    },
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+    "simucube-heusinkveld-build": {
+      "label": "Simucube + Heusinkveld",
+      "components": ["nvidia_driver", "windows_update", "simucube_tuner", "heusinkveld_app", "simhub"]
+    },
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Install PitStop and configure it for this rig.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
-    )
-    parser.add_argument(
-        "--profile",
-        required=True,
-        choices=VALID_PROFILES,
-        metavar="PROFILE",
-        help=f"Rig profile. One of: {', '.join(VALID_PROFILES)}",
-    )
-    parser.add_argument(
-        "--addons",
-        nargs="*",
-        default=[],
-        choices=VALID_ADDONS + [""],
-        metavar="ADDON",
-        help=f"Optional add-ons. Any of: {', '.join(VALID_ADDONS)}",
-    )
-    parser.add_argument(
-        "--uninstall",
-        action="store_true",
-        help="Remove PitStop from startup (does not delete files).",
-    )
+    "simucube-moza-pedals-build": {
+      "label": "Simucube + MOZA Pedals",
+      "components": ["nvidia_driver", "windows_update", "simucube_tuner", "moza_pithouse", "simhub"]
+    },
 
-    args = parser.parse_args()
-    addons = [a for a in (args.addons or []) if a in VALID_ADDONS]
+    "fanatec-build": {
+      "label": "Fanatec + Heusinkveld",
+      "components": ["nvidia_driver", "windows_update", "fanatec_app", "heusinkveld_app", "simhub"]
+    },
 
-    # Auto-elevate to admin if not already running elevated
-    import ctypes
-    if not ctypes.windll.shell32.IsUserAnAdmin():
-        print("  Requesting administrator privileges...")
-        # Find the actual python.exe — not the py launcher
-        python_exe = Path(sys.executable)
-        if python_exe.name.lower() in ("py.exe", "py3.exe"):
-            # Running via py launcher — find the real python.exe
-            import subprocess
-            result = subprocess.run(
-                ["py", "-3.12", "-c", "import sys; print(sys.executable)"],
-                capture_output=True, text=True
-            )
-            python_exe = Path(result.stdout.strip())
+    "fanatec-moza-pedals-build": {
+      "label": "Fanatec + MOZA Pedals",
+      "components": ["nvidia_driver", "windows_update", "fanatec_app", "moza_pithouse", "simhub"]
+    },
 
-        params = f'--profile {args.profile}'
-        if addons:
-            params += f' --addons {" ".join(addons)}'
-        if args.uninstall:
-            params += ' --uninstall'
-        script = str(Path(__file__).resolve())
-        ret = ctypes.windll.shell32.ShellExecuteW(
-            None, "runas", str(python_exe),
-            f'"{script}" {params}', None, 1
-        )
-        if ret > 32:
-            sys.exit(0)  # Re-launched as admin — exit this instance
-        print("  WARNING: Could not elevate. Continuing without admin rights.")
-        print("  Windows Security exclusion may not be applied.")
+    "fanatec-simucube-pedals-build": {
+      "label": "Fanatec + Simucube Pedals",
+      "components": ["nvidia_driver", "windows_update", "fanatec_app", "simucube_tuner", "simhub"]
+    }
 
-    print(f"\n{'='*50}")
-    print(f"  PitStop — Podium 1 Racing")
-    print(f"{'='*50}")
+  },
 
-    if args.uninstall:
-        print("\n  Removing PitStop from startup…")
-        unregister_startup()
-        print("  Done. PitStop will no longer start with Windows.")
-        print("  (Files in AppData\\Podium1\\PitStop were not deleted.)")
-        return
+  "addons": {
+    "streamdeck": {
+      "label": "Stream Deck",
+      "component": "streamdeck"
+    },
+    "sensit": {
+      "label": "Sensit Seat Haptics",
+      "component": "sensit_haptics"
+    }
+  },
 
-    exe = resolve_exe()
-    print(f"\n  Profile : {args.profile}")
-    print(f"  Add-ons : {', '.join(addons) if addons else '(none)'}")
-    print(f"  Exe     : {exe}")
-    print()
-
-    # 1. Write config
-    write_config(args.profile, addons)
-
-    # 2. Remove stale startup entry, then re-add
-    unregister_startup()
-    ok = register_startup(exe)
-
-    # 3. Unblock exe, disable Smart App Control, add Windows Security exclusion
-    print("  Configuring Windows Security...")
-    disable_smart_app_control()
-    unblock_exe(exe)
-
-    print()
-    if ok:
-        print("  ✅  PitStop installed successfully!")
-        print(f"  It will start automatically next time Windows boots.")
-        print(f"  To start it now: double-click PitStop.exe or run it from the tray area.")
-    else:
-        print("  ⚠️   Config saved but startup registration failed.")
-        print(f"  Manually run: {exe}")
-
-    print()
-
-
-if __name__ == "__main__":
-    main()
-
-"all-apps-build": {
-  "label": "All Apps Test",
-  "components": [
-    "nvidia_driver",
-    "windows_update",
-    "asetek_racehub",
-    "moza_pithouse",
-    "simucube_tuner",
-    "fanatec_app",
-    "heusinkveld_app",
-    "simhub",
-    "streamdeck",
-    "sensit_haptics"
-  ]
+  "alerts": []
 }
