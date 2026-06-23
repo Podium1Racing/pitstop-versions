@@ -60,8 +60,8 @@
 
     "fanatec_app": {
       "label": "Fanatec App",
-      "approved_version": "1.5.1.2",
-      "minimum_version": "1.5.1.2",
+      "approved_version": "1.5.1+2",
+      "minimum_version": "1.5.1+2",
       "exe_name": "Fanatec.exe",
       "install_path_hint": "C:\\Program Files\\Fanatec\\FanatecUI\\UI",
       "update_url": "https://www.fanatec.com/us/en/s/download-apps-driver",
