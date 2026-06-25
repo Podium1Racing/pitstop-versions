@@ -25,7 +25,7 @@
       "approved_version": "4.4.7",
       "minimum_version": "4.4.7",
       "exe_name": "RaceHub™.exe",
-      "install_path_hint": "C:\Program Files\Asetek SimSports\RaceHub™\Application Folder\Build",
+      "install_path_hint": "C:\\Program Files\\Asetek SimSports\\RaceHub™\\Application Folder\\Build",
       "update_url": "https://www.asetek.com/simsports/racehub/",
       "notes": "Version detected from firmware filename \"4.4.7 - Firmware Versions\" in Firmware Files folder. approved_firmware keys match partial component names from .bin filenames.",
       "approved_firmware": {
