@@ -107,7 +107,6 @@
       "approved_version": "0.10.3",
       "minimum_version": "0.10.3",
       "exe_name": "simracing.exe",
-      "registry_value": "Version",
       "install_path_hint": "C:\Program Files\SensitHaptics SimRacing Cockpit",
       "update_url": "https://sensithaptics.com/pages/downloads",
       "notes": "Optional add-on. Only checked on rigs where installed."
