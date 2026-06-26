@@ -1,1792 +1,259 @@
-"""
-PitStop — Podium 1 Racing System Monitor
-"""
-
-import sys
-import os
-import json
-import threading
-import time
-import subprocess
-import winreg
-import logging
-import tkinter as tk
-from tkinter import font as tkfont
-from pathlib import Path
-from datetime import datetime, timedelta
-from packaging import version as pkg_version
-import webview
-
-import requests
-import pystray
-from pystray import MenuItem as item, Menu
-from PIL import Image, ImageDraw
-
-APP_DIR = Path(os.getenv("APPDATA")) / "Podium1" / "PitStop"
-APP_DIR.mkdir(parents=True, exist_ok=True)
-LOG_FILE    = APP_DIR / "pitstop.log"
-CONFIG_FILE = APP_DIR / "config.json"
-
-logging.basicConfig(
-    filename=str(LOG_FILE),
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)s  %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-log = logging.getLogger("pitstop")
-
-VERSIONS_URL = (
-    "https://raw.githubusercontent.com/LebronDunks/pitstop-versions"
-    "/refs/heads/main/versions.json"
-)
-
-CHECK_INTERVAL_SECONDS = 60 * 60
-CACHE_TTL_SECONDS      = 60 * 30
-
-def load_config() -> dict:
-    if CONFIG_FILE.exists():
-        try:
-            return json.loads(CONFIG_FILE.read_text())
-        except Exception:
-            pass
-    return {}
-
-def save_config(cfg: dict):
-    CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
-
-def get_profile() -> tuple[str, list[str]]:
-    cfg = load_config()
-    return cfg.get("profile", "moza-build"), cfg.get("addons", [])
-
-def get_customer_profile() -> dict:
-    """Return saved customer profile from config, or empty dict if not logged in."""
-    cfg = load_config()
-    return cfg.get("customer_profile", {})
-
-def save_customer_profile(profile: dict):
-    """Save customer profile to config.json."""
-    cfg = load_config()
-    cfg["customer_profile"] = profile
-    save_config(cfg)
-
-def resolve_components_from_customer(profile: dict) -> list:
-    """
-    Map customer hardware fields from Nathaniels database to component keys.
-    Falls back to the legacy profile system if no customer profile is present.
-    """
-    if not profile:
-        profile_name, addons = get_profile()
-        manifest = fetch_manifest()
-        profiles_def = manifest.get("profiles", {})
-        addons_def   = manifest.get("addons", {})
-        active_keys  = list(profiles_def.get(profile_name, {}).get("components", []))
-        for addon_key in addons:
-            comp_key = addons_def.get(addon_key, {}).get("component")
-            if comp_key and comp_key not in active_keys:
-                active_keys.append(comp_key)
-        return active_keys
-
-    keys = ["nvidia_driver", "windows_update", "simhub"]
-
-    wheelbase = (profile.get("wheelbase") or "").lower()
-    if "asetek" in wheelbase:
-        keys.append("asetek_racehub")
-    if "moza" in wheelbase:
-        keys.append("moza_pithouse")
-    if "simucube" in wheelbase:
-        keys.append("simucube_truedrive")
-
-    pedals = (profile.get("pedals") or "").lower()
-    if "heusinkveld" in pedals:
-        if "heusinkveld_app" not in keys:
-            keys.append("heusinkveld_app")
-
-    addons = (profile.get("addOns") or "").lower()
-    if "stream deck" in addons or "streamdeck" in addons:
-        keys.append("streamdeck")
-    if "sensit" in addons:
-        keys.append("sensit_haptics")
-
-    return keys
-
-def get_customer_display_name() -> str:
-    """Return a display label for the current customer."""
-    profile = get_customer_profile()
-    if profile:
-        name = profile.get("name", "")
-        rig  = profile.get("rig", "")
-        if name and rig:
-            return f"{name} - {rig}"
-        return name or rig or "Logged In"
-    profile_name, _ = get_profile()
-    return PROFILE_LABELS.get(profile_name, profile_name)
-
-_COLOR_MAP = {
-    "green":  "#22C55E",
-    "yellow": "#F59E0B",
-    "red":    "#CC1122",
-    "grey":   "#555555",
-}
-
-def _load_logo() -> "Image.Image | None":
-    exe_dir = Path(sys.argv[0]).resolve().parent
-    candidates = [
-        exe_dir / "p1logo.png",
-        Path(sys.executable).parent / "p1logo.png",
-        Path(__file__).parent / "p1logo.png",
-        Path(__file__).parent / "dist" / "p1logo.png",
-    ]
-    for c in candidates:
-        if c.exists():
-            log.info("Logo found: %s", c)
-            return Image.open(c).convert("RGBA")
-    log.warning("P1 logo not found — checked: %s", [str(c) for c in candidates])
-    return None
-
-
-def make_icon(color_name: str) -> Image.Image:
-    size  = 64
-    color = _COLOR_MAP.get(color_name, _COLOR_MAP["grey"])
-    logo = _load_logo()
-    if logo:
-        img  = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-        logo = logo.resize((size, size), Image.LANCZOS)
-        img.paste(logo, (0, 0), logo)
-        draw = ImageDraw.Draw(img)
-        draw.ellipse([44, 44, 62, 62], fill="#1A1A2E")
-        draw.ellipse([47, 47, 61, 61], fill=color)
-        return img
-    img   = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    draw  = ImageDraw.Draw(img)
-    draw.ellipse([2, 2, size - 3, size - 3], fill="#1A1A2E")
-    draw.ellipse([6, 6, size - 7, size - 7], outline=color, width=4)
-    draw.rectangle([18, 20, 23, 44], fill=color)
-    draw.rectangle([23, 20, 33, 25], fill=color)
-    draw.rectangle([23, 30, 33, 35], fill=color)
-    draw.rectangle([33, 20, 38, 35], fill=color)
-    draw.rectangle([42, 20, 47, 44], fill=color)
-    draw.rectangle([39, 40, 50, 44], fill=color)
-    return img
-
-def ver_gte(installed: str, required: str) -> bool:
-    try:
-        return pkg_version.parse(installed) >= pkg_version.parse(required)
-    except Exception:
-        return installed >= required
-
-_manifest_cache: dict = {}
-_manifest_fetched_at: float = 0.0
-
-def fetch_manifest(force: bool = False) -> dict:
-    global _manifest_cache, _manifest_fetched_at
-    now = time.time()
-    if not force and _manifest_cache and (now - _manifest_fetched_at) < CACHE_TTL_SECONDS:
-        return _manifest_cache
-    try:
-        resp = requests.get(VERSIONS_URL, timeout=10)
-        resp.raise_for_status()
-        _manifest_cache = resp.json()
-        _manifest_fetched_at = now
-        log.info("Manifest fetched OK")
-    except Exception as exc:
-        log.warning("Could not fetch manifest: %s", exc)
-        if not _manifest_cache:
-            local = Path(sys.executable).parent / "versions.json"
-            if local.exists():
-                _manifest_cache = json.loads(local.read_text())
-                log.info("Loaded bundled versions.json as fallback")
-    return _manifest_cache
-
-class CheckResult:
-    def __init__(self, key, label, status, installed, required, message, action=""):
-        self.key       = key
-        self.label     = label
-        self.status    = status
-        self.installed = installed
-        self.required  = required
-        self.message   = message
-        self.action    = action
-
-class DiagResult:
-    def __init__(self, key, title, severity, description, timestamp=""):
-        self.key         = key
-        self.title       = title
-        self.severity    = severity
-        self.description = description
-        self.timestamp   = timestamp
-
-def _reg_read(hive_str: str, key_path: str, value_name: str):
-    hive_map = {"HKLM": winreg.HKEY_LOCAL_MACHINE, "HKCU": winreg.HKEY_CURRENT_USER}
-    parts = hive_str.split("\\", 1)
-    hive  = hive_map.get(parts[0])
-    if not hive:
-        return None
-    sub = parts[1] if len(parts) > 1 else ""
-
-    # Try the path as given first, then WOW6432Node fallback for 32-bit apps on 64-bit Windows
-    candidates = [sub]
-    if sub.upper().startswith("SOFTWARE\\") and "WOW6432NODE" not in sub.upper():
-        candidates.append("SOFTWARE\\WOW6432Node\\" + sub[len("SOFTWARE\\"):])
-
-    for path in candidates:
-        try:
-            with winreg.OpenKey(hive, path) as k:
-                val, _ = winreg.QueryValueEx(k, value_name)
-                return str(val)
-        except Exception:
-            continue
-    return None
-
-def _silent_ps(cmd: list, timeout: int = 10) -> str:
-    si = subprocess.STARTUPINFO()
-    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    si.wShowWindow = 0
-    try:
-        result = subprocess.check_output(
-            cmd,
-            timeout=timeout,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-            startupinfo=si,
-            stderr=subprocess.DEVNULL,
-        )
-        return result.decode(errors="replace").strip()
-    except Exception as exc:
-        log.warning("Silent PS failed: %s", exc)
-        return ""
-
-def _get_exe_version(exe_path: Path):
-    result = _silent_ps(
-        ["powershell", "-NonInteractive", "-NoProfile", "-WindowStyle", "Hidden",
-         "-command", f"(Get-Item '{exe_path}').VersionInfo.FileVersion"],
-        timeout=10,
-    )
-    return result if result else None
-
-def _get_exe_product_version(exe_path: Path):
-    # Reads ProductVersion (user-facing version shown inside the app)
-    # instead of FileVersion (internal build number).
-    result = _silent_ps(
-        ["powershell", "-NonInteractive", "-NoProfile", "-WindowStyle", "Hidden",
-         "-command", f"(Get-Item '{exe_path}').VersionInfo.ProductVersion"],
-        timeout=10,
-    )
-    return result if result else None
-
-def check_nvidia_driver(comp):
-    approved  = comp.get("approved_version", "")
-    installed = None
-    try:
-        si = subprocess.STARTUPINFO()
-        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        si.wShowWindow = 0
-        out = subprocess.check_output(
-            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
-            timeout=10,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-            startupinfo=si,
-            stderr=subprocess.DEVNULL,
-        ).decode().strip().split("\n")[0].strip()
-        installed = out
-    except Exception as exc:
-        log.warning("nvidia-smi failed: %s", exc)
-
-    if not installed:
-        return CheckResult("nvidia_driver", comp["label"], "unknown",
-                           "Not found", approved,
-                           "NVIDIA driver not detected.",
-                           comp.get("update_url", ""))
-    if ver_gte(installed, approved):
-        return CheckResult("nvidia_driver", comp["label"], "ok",
-                           installed, approved,
-                           f"GPU driver v{installed} is current.",
-                           "open_nvidia_app")
-    else:
-        return CheckResult("nvidia_driver", comp["label"], "warning",
-                           installed, approved,
-                           f"GPU driver update available: {installed} -> {approved}",
-                           "open_nvidia_app")
-
-def check_windows_update(comp):
-    try:
-        import pythoncom
-        import win32com.client
-        pythoncom.CoInitialize()
-        wua      = win32com.client.Dispatch("Microsoft.Update.Session")
-        searcher = wua.CreateUpdateSearcher()
-        result   = searcher.Search("IsInstalled=0 and IsHidden=0 and Type='Software'")
-        count    = result.Updates.Count
-        if count == 0:
-            return CheckResult("windows_update", comp["label"], "ok",
-                               "Up to date", "Up to date",
-                               "Windows is up to date.",
-                               "open_windows_update")
-        elif count <= 5:
-            return CheckResult("windows_update", comp["label"], "warning",
-                               f"{count} pending", "0 pending",
-                               f"{count} update(s) pending.",
-                               "open_windows_update")
-        else:
-            return CheckResult("windows_update", comp["label"], "error",
-                               f"{count} pending", "0 pending",
-                               f"{count} updates pending — action needed.",
-                               "open_windows_update")
-    except Exception as exc:
-        log.warning("Windows Update check failed: %s", exc)
-        return CheckResult("windows_update", comp["label"], "unknown",
-                           "Unknown", "Unknown",
-                           "Could not check Windows Update.")
-
-
-# ---------------------------------------------------------------------------
-# check_registry_app  — fixed MOZA launch path logic
-# ---------------------------------------------------------------------------
-
-def check_registry_app(key, comp):
-    approved  = comp.get("approved_version", "")
-    reg_key   = comp.get("registry_key", "")
-    reg_val   = comp.get("registry_value", "Version")
-    installed = None
-    exe_path  = None          # resolved Path to the installed exe
-
-    if reg_key:
-        reg_result = _reg_read(reg_key, "", reg_val)
-        if reg_result:
-            # Case A: registry value IS a full path to the exe (e.g. MOZA "path" key)
-            if reg_result.endswith(".exe") or ("\\" in reg_result and Path(reg_result).suffix.lower() == ".exe"):
-                candidate = Path(reg_result)
-                if candidate.exists():
-                    exe_path  = candidate
-                    installed = _get_exe_version(candidate)
-            else:
-                # Case B: registry value is a plain version string
-                installed = reg_result
-
-    # Fallback: build path from install_path_hint + exe_name
-    if not installed or not exe_path:
-        hint = comp.get("install_path_hint", "")
-        exe  = comp.get("exe_name", "")
-        if hint and exe:
-            candidate = Path(hint) / exe
-            if candidate.exists():
-                exe_path = candidate
-                if not installed:
-                    installed = _get_exe_version(candidate)
-
-    if not installed:
-        return CheckResult(key, comp["label"],
-                           "unknown",
-                           "Not installed", approved,
-                           f"{comp['label']} not found.",
-                           comp.get("update_url", ""))
-
-    # Build the action: prefer launching the local exe directly
-    action = f"launch_exe:{exe_path}" if exe_path and exe_path.exists() else comp.get("update_url", "")
-
-    if ver_gte(installed, approved):
-        return CheckResult(key, comp["label"], "ok",
-                           installed, approved,
-                           f"{comp['label']} is current ({installed}).",
-                           action)
-    else:
-        return CheckResult(key, comp["label"], "warning",
-                           installed, approved,
-                           f"Update available: {installed} -> {approved}",
-                           action)
-
-
-def check_fanatec_app(comp):
-    approved = comp.get("approved_version", "")
-    hint     = comp.get("install_path_hint", "C:\\Program Files\\Fanatec\\FanatecUI\\UI")
-    exe_name = comp.get("exe_name", "Fanatec.exe")
-    exe_path = Path(hint) / exe_name
-    installed = None
-
-    if exe_path.exists():
-        installed = _get_exe_version(exe_path)
-
-    if not installed:
-        return CheckResult("fanatec_app", comp["label"],
-                           "unknown", "Not installed", approved,
-                           f"{comp['label']} not found.",
-                           comp.get("update_url", ""))
-
-    action = f"launch_exe:{exe_path}" if exe_path.exists() else comp.get("update_url", "")
-
-    if ver_gte(installed, approved):
-        return CheckResult("fanatec_app", comp["label"], "ok",
-                           installed, approved,
-                           f"{comp['label']} is current ({installed}).", action)
-    else:
-        return CheckResult("fanatec_app", comp["label"], "warning",
-                           installed, approved,
-                           f"Update available: {installed} -> {approved}", action)
-
-
-def check_simucube_tuner(comp):
-    approved = comp.get("approved_version", "")
-    hint     = comp.get("install_path_hint", "C:\\Program Files\\SimucubeTuner")
-    exe_name = comp.get("exe_name", "sc-tuner.exe")
-    ver_file = Path(hint) / "version"
-    exe_path = Path(hint) / exe_name
-    installed = None
-
-    if ver_file.exists():
-        try:
-            installed = ver_file.read_text(encoding='utf-8').strip()
-        except Exception:
-            pass
-
-    if not installed and exe_path.exists():
-        installed = _get_exe_version(exe_path)
-
-    if not installed:
-        return CheckResult("simucube_tuner", comp["label"],
-                           "unknown", "Not installed", approved,
-                           f"{comp['label']} not found.",
-                           comp.get("update_url", ""))
-
-    action = f"launch_exe:{exe_path}" if exe_path.exists() else comp.get("update_url", "")
-
-    if ver_gte(installed, approved):
-        return CheckResult("simucube_tuner", comp["label"], "ok",
-                           installed, approved,
-                           f"{comp['label']} is current ({installed}).", action)
-    else:
-        return CheckResult("simucube_tuner", comp["label"], "warning",
-                           installed, approved,
-                           f"Update available: {installed} -> {approved}", action)
-
-
-
-
-def check_asetek_racehub(comp):
-    # RaceHub version detection strategy:
-    # The user-facing app version (e.g. 4.4.7) is encoded in the name of the
-    # firmware versions text file inside the Firmware Files folder:
-    #   "4.4.7 - Firmware Versions"  (Text Document, no .txt shown in Explorer)
-    # Path: <install_path_hint>/../Firmware Update Tools/Firmware Files/
-    # install_path_hint points to .../Application Folder/Build, so one .parent
-    # reaches Application Folder, then we descend into Firmware Update Tools.
-
-    approved     = comp.get("approved_version", "")
-    hint         = comp.get("install_path_hint",
-                             r"C:\Program Files\Asetek SimSports\RaceHub™\Application Folder\Build")
-    exe_name     = comp.get("exe_name", "RaceHub™.exe")
-    exe_path     = Path(hint) / exe_name
-    firmware_dir = Path(hint).parent / "Firmware Update Tools" / "Firmware Files"
-    installed    = None
-
-    # Parse app version from firmware versions filename
-    if firmware_dir.exists():
-        for f in firmware_dir.iterdir():
-            if "Firmware Versions" in f.name:
-                # Filename is "4.4.7 - Firmware Versions" or "4.4.7 - Firmware Versions.txt"
-                stem = f.stem
-                parts = stem.split(" - ", 1)
-                candidate = parts[0].strip()
-                if candidate.replace(".", "").isdigit():
-                    installed = candidate
-                    break
-
-    # If version file not found, fall back to checking exe exists
-    if not installed and not exe_path.exists():
-        return CheckResult("asetek_racehub", comp["label"],
-                           "unknown", "Not installed", approved,
-                           f"{comp['label']} not found.",
-                           comp.get("update_url", ""))
-
-    if not installed:
-        installed = "Unknown"
-
-    action = f"launch_exe:{exe_path}" if exe_path.exists() else comp.get("update_url", "")
-
-    if installed != "Unknown" and ver_gte(installed, approved):
-        return CheckResult("asetek_racehub", comp["label"], "ok",
-                           installed, approved,
-                           f"{comp['label']} is current ({installed}).", action)
-    elif installed == "Unknown":
-        return CheckResult("asetek_racehub", comp["label"], "unknown",
-                           installed, approved,
-                           f"{comp['label']} installed but version could not be determined.", action)
-    else:
-        return CheckResult("asetek_racehub", comp["label"], "warning",
-                           installed, approved,
-                           f"Update available: {installed} -> {approved}", action)
-
-
-def check_simhub(comp):
-    # SimHub's exe FileVersion is 1.0.0.0 and does not match the displayed version.
-    # SimHub writes "Starting SimHub vX.X.X" to its log on every launch.
-    # We parse that line from the log as it is the most reliable source.
-    approved = comp.get("approved_version", "")
-    hint     = comp.get("install_path_hint", r"C:\Program Files (x86)\SimHub")
-    exe_name = comp.get("exe_name", "SimHubWPF.exe")
-    exe_path = Path(hint) / exe_name
-    log_path = Path(hint) / "Logs" / "SimHub.txt"
-    installed = None
-
-    # Parse version from log file - look for "Starting SimHub vX.X.X"
-    if log_path.exists():
-        try:
-            with open(log_path, encoding="utf-8", errors="replace") as lf:
-                for line in lf:
-                    if "Starting SimHub v" in line:
-                        # Extract version after "Starting SimHub v"
-                        idx = line.index("Starting SimHub v") + len("Starting SimHub v")
-                        ver = line[idx:].split()[0].strip()
-                        if ver:
-                            installed = ver
-                            break
-        except Exception as exc:
-            log.warning("SimHub log parse failed: %s", exc)
-
-    if not installed and not exe_path.exists():
-        return CheckResult("simhub", comp["label"],
-                           "unknown", "Not installed", approved,
-                           f"{comp['label']} not found.",
-                           comp.get("update_url", ""))
-
-    if not installed:
-        installed = "Unknown"
-
-    action = f"launch_exe:{exe_path}" if exe_path.exists() else comp.get("update_url", "")
-
-    if installed != "Unknown" and ver_gte(installed, approved):
-        return CheckResult("simhub", comp["label"], "ok",
-                           installed, approved,
-                           f"{comp['label']} is current ({installed}).", action)
-    elif installed == "Unknown":
-        return CheckResult("simhub", comp["label"], "unknown",
-                           installed, approved,
-                           f"{comp['label']} installed but version could not be determined.", action)
-    else:
-        return CheckResult("simhub", comp["label"], "warning",
-                           installed, approved,
-                           f"Update available: {installed} -> {approved}", action)
-
-
-def _run_ps(command: str) -> str:
-    return _silent_ps(
-        ["powershell", "-NonInteractive", "-NoProfile", "-WindowStyle", "Hidden",
-         "-command", command],
-        timeout=20,
-    )
-
-def diag_usb_disconnects() -> DiagResult:
-    try:
-        ps = (
-            "$since = (Get-Date).AddDays(-7);"
-            "$events = Get-WinEvent -FilterHashtable @{LogName='System'; Id=7; StartTime=$since} -ErrorAction SilentlyContinue;"
-            "if ($events) { $events.Count } else { 0 }"
-        )
-        count_str = _run_ps(ps)
-        count = int(count_str) if count_str.isdigit() else 0
-        if count == 0:
-            return DiagResult("usb_disconnects", "USB devices", "clear", "No USB disconnect events in the last 7 days.")
-        elif count <= 3:
-            return DiagResult("usb_disconnects", "USB disconnect events", "warning",
-                              f"{count} USB disconnect event(s) in the last 7 days. Monitor for loose cables or power issues.")
-        else:
-            return DiagResult("usb_disconnects", "USB disconnecting repeatedly", "critical",
-                              f"{count} USB disconnect events in the last 7 days. Check cables, USB hubs, and power settings.")
-    except Exception as exc:
-        log.warning("diag_usb_disconnects failed: %s", exc)
-        return DiagResult("usb_disconnects", "USB devices", "info", "Could not check USB disconnect history.")
-
-def diag_app_crashes() -> DiagResult:
-    try:
-        ps = (
-            "$since = (Get-Date).AddDays(-7);"
-            "$events = Get-WinEvent -FilterHashtable @{LogName='Application'; Id=1000; StartTime=$since} -ErrorAction SilentlyContinue;"
-            "if ($events) { $events.Count } else { 0 }"
-        )
-        count_str = _run_ps(ps)
-        count = int(count_str) if count_str.isdigit() else 0
-        ps2 = (
-            "$since = (Get-Date).AddDays(-7);"
-            "$e = Get-WinEvent -FilterHashtable @{LogName='Application'; Id=1000; StartTime=$since} "
-            "-MaxEvents 1 -ErrorAction SilentlyContinue;"
-            "if ($e) { $e[0].TimeCreated.ToString('MMM dd h:mm tt') + '|' + "
-            "([xml]$e[0].ToXml()).Event.EventData.Data[0] } else { '' }"
-        )
-        recent = _run_ps(ps2)
-        recent_time, recent_app = (recent.split("|", 1) + ["", ""])[:2]
-        if count == 0:
-            return DiagResult("app_crashes", "Application crashes", "clear", "No app crashes detected in the last 7 days.")
-        elif count <= 3:
-            desc = f"{count} crash(es) in the last 7 days."
-            if recent_app:
-                desc += f" Most recent: {recent_app.strip()} ({recent_time})"
-            return DiagResult("app_crashes", "Application crashes", "warning", desc, recent_time)
-        else:
-            desc = f"{count} crashes in the last 7 days — system may be unstable."
-            if recent_app:
-                desc += f" Most recent: {recent_app.strip()} ({recent_time})"
-            return DiagResult("app_crashes", "Frequent app crashes", "critical", desc, recent_time)
-    except Exception as exc:
-        log.warning("diag_app_crashes failed: %s", exc)
-        return DiagResult("app_crashes", "Application crashes", "info", "Could not check crash history.")
-
-def diag_bsod() -> DiagResult:
-    try:
-        ps = (
-            "$since = (Get-Date).AddDays(-30);"
-            "$events = Get-WinEvent -FilterHashtable @{LogName='System'; Id=41; StartTime=$since} -ErrorAction SilentlyContinue;"
-            "if ($events) { $events[0].TimeCreated.ToString('MMM dd yyyy') + '|' + $events.Count } else { '' }"
-        )
-        result = _run_ps(ps)
-        if not result:
-            return DiagResult("bsod", "Blue screen (BSOD)", "clear", "No blue screen events in the last 30 days.")
-        parts  = result.split("|", 1)
-        recent = parts[0].strip()
-        count  = int(parts[1].strip()) if len(parts) > 1 and parts[1].strip().isdigit() else 1
-        return DiagResult("bsod", "Blue screen (BSOD)", "critical",
-                          f"{count} BSOD event(s) in the last 30 days. Most recent: {recent}. Check drivers and hardware.", recent)
-    except Exception as exc:
-        log.warning("diag_bsod failed: %s", exc)
-        return DiagResult("bsod", "Blue screen (BSOD)", "info", "Could not check BSOD history.")
-
-def diag_dirty_shutdown() -> DiagResult:
-    try:
-        ps = (
-            "$e = Get-WinEvent -FilterHashtable @{LogName='System'; Id=6008} "
-            "-MaxEvents 1 -ErrorAction SilentlyContinue;"
-            "if ($e) { $e[0].TimeCreated.ToString('MMM dd yyyy h:mm tt') } else { '' }"
-        )
-        result = _run_ps(ps)
-        if not result:
-            return DiagResult("dirty_shutdown", "Unexpected shutdowns", "clear", "No unexpected shutdowns detected.")
-        return DiagResult("dirty_shutdown", "Unexpected shutdown detected", "warning",
-                          f"System did not shut down cleanly. Last occurrence: {result}. Could indicate a crash or power loss.", result)
-    except Exception as exc:
-        log.warning("diag_dirty_shutdown failed: %s", exc)
-        return DiagResult("dirty_shutdown", "Unexpected shutdowns", "info", "Could not check shutdown history.")
-
-def diag_pending_reboot() -> DiagResult:
-    try:
-        keys_to_check = [
-            r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired",
-            r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending",
-        ]
-        pending = False
-        for key in keys_to_check:
-            parts = key.split("\\", 1)
-            hive  = winreg.HKEY_LOCAL_MACHINE
-            try:
-                with winreg.OpenKey(hive, parts[1]):
-                    pending = True
-                    break
-            except Exception:
-                continue
-        if pending:
-            return DiagResult("pending_reboot", "Reboot required", "warning",
-                              "Windows is waiting for a reboot to finish applying updates. Reboot the rig when possible.")
-        return DiagResult("pending_reboot", "Reboot status", "clear", "No pending reboot required.")
-    except Exception as exc:
-        log.warning("diag_pending_reboot failed: %s", exc)
-        return DiagResult("pending_reboot", "Reboot status", "info", "Could not check reboot status.")
-
-def diag_disk_space() -> DiagResult:
-    try:
-        import shutil
-        low_drives = []
-        for drive_letter in "CDEFGH":
-            drive = f"{drive_letter}:\\"
-            if Path(drive).exists():
-                total, used, free = shutil.disk_usage(drive)
-                free_gb = free / (1024 ** 3)
-                if free_gb < 20:
-                    low_drives.append(f"{drive_letter}: ({free_gb:.1f} GB free)")
-        if not low_drives:
-            return DiagResult("disk_space", "Disk space", "clear", "All drives have sufficient free space.")
-        elif len(low_drives) == 1:
-            return DiagResult("disk_space", "Low disk space", "warning",
-                              f"Drive {low_drives[0]} is running low. Less than 20 GB free can cause sim issues.")
-        else:
-            return DiagResult("disk_space", "Low disk space", "critical",
-                              f"Multiple drives low: {', '.join(low_drives)}. Free up space to avoid crashes and stuttering.")
-    except Exception as exc:
-        log.warning("diag_disk_space failed: %s", exc)
-        return DiagResult("disk_space", "Disk space", "info", "Could not check disk space.")
-
-def diag_gpu_temp() -> DiagResult:
-    try:
-        out = subprocess.check_output(
-            ["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader"],
-            timeout=10, creationflags=subprocess.CREATE_NO_WINDOW,
-        ).decode().strip().split("\n")[0].strip()
-        temp = int(out)
-        if temp >= 90:
-            return DiagResult("gpu_temp", "GPU temperature", "critical",
-                              f"GPU is running at {temp}°C — critically hot. Check case airflow and GPU cooler immediately.")
-        elif temp >= 80:
-            return DiagResult("gpu_temp", "GPU temperature", "warning",
-                              f"GPU is running at {temp}°C — above recommended range. Monitor airflow and ensure adequate cooling.")
-        else:
-            return DiagResult("gpu_temp", "GPU temperature", "clear", f"GPU temperature is {temp}°C — within normal range.")
-    except Exception as exc:
-        log.warning("diag_gpu_temp failed: %s", exc)
-        return DiagResult("gpu_temp", "GPU temperature", "info", "Could not read GPU temperature.")
-
-def diag_system_uptime() -> DiagResult:
-    try:
-        import ctypes
-        tick_ms  = ctypes.windll.kernel32.GetTickCount64()
-        uptime_s = tick_ms / 1000
-        days     = int(uptime_s // 86400)
-        hours    = int((uptime_s % 86400) // 3600)
-        if days >= 14:
-            return DiagResult("uptime", "System uptime", "warning",
-                              f"Rig has been running for {days} days without a reboot. A reboot is recommended to clear memory and apply updates.",
-                              f"{days}d {hours}h uptime")
-        else:
-            return DiagResult("uptime", "System uptime", "info",
-                              f"System has been running for {days} days, {hours} hours.",
-                              f"{days}d {hours}h uptime")
-    except Exception as exc:
-        log.warning("diag_system_uptime failed: %s", exc)
-        return DiagResult("uptime", "System uptime", "info", "Could not check system uptime.")
-
-def diag_network_errors() -> DiagResult:
-    try:
-        ps = (
-            "$since = (Get-Date).AddDays(-7);"
-            "$events = Get-WinEvent -FilterHashtable @{LogName='System'; "
-            "ProviderName='e1iexpress','nvlddmkm','tcpip'; StartTime=$since} "
-            "-ErrorAction SilentlyContinue;"
-            "if ($events) { $events.Count } else { 0 }"
-        )
-        count_str = _run_ps(ps)
-        count = int(count_str) if count_str.isdigit() else 0
-        if count == 0:
-            return DiagResult("network_errors", "Network adapter", "clear", "No network adapter errors in the last 7 days.")
-        else:
-            return DiagResult("network_errors", "Network adapter errors", "warning",
-                              f"{count} network error event(s) in the last 7 days. May cause connection drops during online racing.")
-    except Exception as exc:
-        log.warning("diag_network_errors failed: %s", exc)
-        return DiagResult("network_errors", "Network adapter", "info", "Could not check network error history.")
-
-def diag_cpu_temp() -> DiagResult:
-    try:
-        ps = (
-            "$t = Get-WmiObject MSAcpi_ThermalZoneTemperature -Namespace 'root/wmi' "
-            "-ErrorAction SilentlyContinue | Select-Object -First 1 CurrentTemperature;"
-            "if ($t) { [math]::Round($t.CurrentTemperature / 10 - 273.15) } else { '' }"
-        )
-        result = _run_ps(ps)
-        if not result or not result.lstrip("-").isdigit():
-            return DiagResult("cpu_temp", "CPU temperature", "info", "CPU temperature sensor not accessible on this system.")
-        temp = int(result)
-        if temp >= 95:
-            return DiagResult("cpu_temp", "CPU temperature", "critical",
-                              f"CPU is running at {temp}°C — critically hot. Check CPU cooler and case airflow immediately.")
-        elif temp >= 80:
-            return DiagResult("cpu_temp", "CPU temperature", "warning",
-                              f"CPU is running at {temp}°C — above recommended range.")
-        else:
-            return DiagResult("cpu_temp", "CPU temperature", "clear", f"CPU temperature is {temp}°C — normal.")
-    except Exception as exc:
-        log.warning("diag_cpu_temp failed: %s", exc)
-        return DiagResult("cpu_temp", "CPU temperature", "info", "Could not read CPU temperature.")
-
-def run_diagnostics() -> list:
-    log.info("Running diagnostics...")
-    checks = [
-        diag_usb_disconnects, diag_app_crashes, diag_bsod, diag_dirty_shutdown,
-        diag_pending_reboot, diag_disk_space, diag_gpu_temp, diag_cpu_temp,
-        diag_system_uptime, diag_network_errors,
-    ]
-    results = []
-    for check in checks:
-        try:
-            results.append(check())
-        except Exception as exc:
-            log.exception("Diagnostic failed: %s", exc)
-    log.info("Diagnostics complete — %d checks run", len(results))
-    return results
-
-def perform_action(action: str):
-    if not action:
-        return
-    if action.startswith("launch_exe:"):
-        exe_path = Path(action[len("launch_exe:"):].replace("/", "\\"))
-        if exe_path.exists():
-            subprocess.Popen([str(exe_path)])
-        else:
-            log.warning("Launch failed — exe not found: %s", exe_path)
-    elif action.endswith(".exe"):
-        exe_path = Path(action.replace("/", "\\"))
-        if exe_path.exists():
-            subprocess.Popen([str(exe_path)])
-        else:
-            log.warning("Launch failed — exe not found: %s", exe_path)
-    elif action.startswith("http"):
-        import webbrowser
-        webbrowser.open(action)
-    elif action == "open_nvidia_app":
-        # Try to open NVIDIA App directly to the drivers tab
-        nvidia_paths = [
-            r"C:\Program Files\NVIDIA Corporation\NVIDIA App\CEF\NVIDIA App.exe",
-            r"C:\Program Files\NVIDIA Corporation\NVIDIA app\CEF\NVIDIA app.exe",
-        ]
-        launched = False
-        for p in nvidia_paths:
-            if Path(p).exists():
-                subprocess.Popen([p], creationflags=subprocess.CREATE_NO_WINDOW)
-                launched = True
-                break
-        if not launched:
-            import webbrowser
-            webbrowser.open("https://www.nvidia.com/en-us/software/nvidia-app/")
-    elif action == "open_windows_update":
-        # Open Windows Update settings directly
-        subprocess.Popen(
-            ["powershell", "-WindowStyle", "Hidden", "-command",
-             "Start-Process 'ms-settings:windowsupdate'"],
-            creationflags=subprocess.CREATE_NO_WINDOW
-        )
-
-REGISTRY_APPS = {
-    "moza_pithouse", "simucube_truedrive",
-    "heusinkveld_app", "streamdeck", "sensit_haptics",
-}
-
-def run_checks_func() -> list:
-    manifest = fetch_manifest()
-    if not manifest:
-        log.error("No manifest available.")
-        return []
-    components_def = manifest.get("components", {})
-    profiles_def   = manifest.get("profiles", {})
-    addons_def     = manifest.get("addons", {})
-    profile_name, enabled_addons = get_profile()
-    profile     = profiles_def.get(profile_name, {})
-    active_keys = list(profile.get("components", []))
-    for addon_key in enabled_addons:
-        comp_key = addons_def.get(addon_key, {}).get("component")
-        if comp_key and comp_key not in active_keys:
-            active_keys.append(comp_key)
-    if not active_keys:
-        log.warning("No components found for profile: %s", profile_name)
-    results = []
-    for key in active_keys:
-        comp = components_def.get(key)
-        if not comp:
-            continue
-        log.info("Checking: %s", key)
-        try:
-            if key == "nvidia_driver":
-                r = check_nvidia_driver(comp)
-            elif key == "windows_update":
-                r = check_windows_update(comp)
-            elif key == "asetek_racehub":
-                r = check_asetek_racehub(comp)
-            elif key == "simucube_tuner":
-                r = check_simucube_tuner(comp)
-            elif key == "fanatec_app":
-                r = check_fanatec_app(comp)
-            elif key == "simhub":
-                r = check_simhub(comp)
-            elif key in REGISTRY_APPS:
-                r = check_registry_app(key, comp)
-            else:
-                log.warning("No checker for: %s", key)
-                continue
-            results.append(r)
-        except Exception as exc:
-            log.exception("Check failed for %s: %s", key, exc)
-            results.append(CheckResult(key, comp.get("label", key), "unknown", "Error", "",
-                                       f"Check failed: {exc}"))
-    return results
-
-def overall_status(results: list) -> str:
-    for r in results:
-        if r.status == "warning":
-            return "yellow"
-        if r.status == "error" and r.installed != "Not installed":
-            return "red"
-    return "green"
-
-C_BG        = "#080808"
-C_PANEL     = "#0E0E0E"
-C_RAISED    = "#141414"
-C_CARD      = "#111111"
-C_HOVER     = "#1A1A1A"
-C_BORDER    = "#1F1F1F"
-C_TEXT      = "#FFFCF6"
-C_MUTED     = "#A89F96"
-C_FAINT     = "#6B6560"
-C_RED_BRAND = "#CC1122"
-C_GREEN     = "#22C55E"
-C_YELLOW    = "#F59E0B"
-C_RED       = "#CC1122"
-C_GREY      = "#555555"
-C_BLUE      = "#60A5FA"
-C_BTN_HOVER = "#1A1A1A"
-
-def _sw_badge_color(result) -> str:
-    if result.status == "unknown" and result.installed == "Not installed":
-        return C_RED
-    return {"ok": C_GREEN, "warning": C_YELLOW, "error": C_RED, "unknown": C_GREY}.get(result.status, C_GREY)
-
-STATUS_COLORS = {"ok": C_GREEN, "warning": C_YELLOW, "error": C_RED, "unknown": C_GREY}
-STATUS_BADGES = {"ok": "UP TO DATE", "warning": "UPDATE AVAILABLE", "error": "MISSING", "unknown": "MISSING"}
-DIAG_COLORS  = {"critical": C_RED, "warning": C_YELLOW, "info": C_BLUE, "clear": C_GREEN}
-DIAG_BADGES  = {"critical": "CRITICAL", "warning": "WARNING", "info": "INFO", "clear": "CLEAR"}
-
-PROFILE_LABELS = {
-    "dev":                          "Dev Machine",
-    "asetek-build":                 "Asetek + Heusinkveld",
-    "asetek-moza-pedals-build":     "Asetek + MOZA Pedals",
-    "asetek-simucube-pedals-build": "Asetek + Simucube Pedals",
-    "moza-build":                   "MOZA Build",
-    "moza-heusinkveld-build":       "MOZA + Heusinkveld",
-    "moza-simucube-pedals-build":   "MOZA + Simucube Pedals",
-    "simucube-build":               "Simucube Build",
-    "simucube-heusinkveld-build":   "Simucube + Heusinkveld",
-    "simucube-moza-pedals-build":   "Simucube + MOZA Pedals",
-    "fanatec-build":                "Fanatec + Heusinkveld",
-    "fanatec-moza-pedals-build":    "Fanatec + MOZA Pedals",
-    "fanatec-simucube-pedals-build":"Fanatec + Simucube Pedals",
-}
-
-def show_toast(title: str, message: str):
-    try:
-        root  = _get_tk_root()
-        toast = tk.Toplevel(root)
-        toast.overrideredirect(True)
-        toast.attributes("-topmost", True)
-        toast.configure(bg=C_HOVER)
-        TOAST_W = 320
-        tk.Label(toast, text=f"  ⚠  {title}",
-                 font=tkfont.Font(family="DM Sans", size=10, weight="bold"),
-                 bg=C_RED, fg=C_TEXT, anchor="w",
-                 padx=10, pady=8, width=TOAST_W).pack(fill="x")
-        tk.Label(toast, text=message,
-                 font=tkfont.Font(family="DM Sans", size=9),
-                 bg=C_PANEL, fg=C_TEXT,
-                 wraplength=TOAST_W - 24,
-                 justify="left", padx=12, pady=10).pack(fill="x")
-        toast.update()
-        w  = TOAST_W
-        h  = toast.winfo_reqheight()
-        sw = toast.winfo_screenwidth()
-        sh = toast.winfo_screenheight()
-        x  = sw - w - 16
-        y  = sh - h - 60
-        toast.geometry(f"{w}x{h}+{x}+{y}")
-        toast.after(8000, toast.destroy)
-        root.wait_window(toast)
-    except Exception as exc:
-        log.warning("Toast failed: %s", exc)
-
-_popup_lock = threading.Lock()
-_tk_root = None
-
-def _get_tk_root():
-    return _tk_root
-
-def _results_to_json(sw_results: list, diag_results: list, status: str) -> dict:
-    profile_label = get_customer_display_name()
-    sw_rows = []
-    for r in sw_results:
-        sw_rows.append({
-            "key":       r.key,
-            "name":      r.label,
-            "installed": r.installed,
-            "approved":  r.required,
-            "status":    r.status,
-            "message":   r.message,
-            "action":    r.action or "",
-        })
-    diag_rows = []
-    for r in diag_results:
-        diag_rows.append({
-            "key":         r.key,
-            "title":       r.title,
-            "severity":    r.severity,
-            "description": r.description,
-            "time":        r.timestamp or "",
-        })
-    return {
-        "sw":           sw_rows,
-        "diag":         diag_rows,
-        "status":       status,
-        "profile":      profile_label,
-        "last_checked": datetime.now().strftime("%b %d at %I:%M %p"),
+{
+  "_meta": {
+    "schema_version": "2.0",
+    "last_updated": "2026-06-24",
+    "updated_by": "Podium 1 Racing",
+    "notes": "Approved versions for all Podium 1 sim rigs. Update this file to push new approved versions fleet-wide."
+  },
+  "components": {
+    "nvidia_driver": {
+      "label": "NVIDIA GPU Driver",
+      "approved_version": "610.62",
+      "minimum_version": "610.62",
+      "update_url": "https://www.nvidia.com/en-us/drivers/",
+      "notes": "Approved after vetting for iRacing + ACC stability.",
+      "check_method": "nvidia_smi"
+    },
+    "windows_update": {
+      "label": "Windows Update",
+      "policy": "auto",
+      "notes": "All pending Windows updates should be applied.",
+      "check_method": "wua_api"
+    },
+    "asetek_racehub": {
+      "label": "Asetek RaceHub",
+      "approved_version": "4.4.7",
+      "minimum_version": "4.4.7",
+      "exe_name": "RaceHub™.exe",
+      "install_path_hint": "C:\\Program Files\\Asetek SimSports\\RaceHub™\\Application Folder\\Build",
+      "update_url": "https://www.asetek.com/simsports/racehub/",
+      "notes": "Version detected from firmware filename \"4.4.7 - Firmware Versions\" in Firmware Update Tools/Firmware Files folder."
+    },
+    "moza_pithouse": {
+      "label": "MOZA Pit House",
+      "approved_version": "1.3.9.36",
+      "minimum_version": "1.3.9.36",
+      "exe_name": "MOZA Pit House.exe",
+      "registry_key": "HKCU\\SOFTWARE\\MOZA\\PitHouse",
+      "registry_value": "path",
+      "install_path_hint": "C:\\Program Files (x86)\\MOZA Pit House\\bin",
+      "update_url": "C:\\Program Files (x86)\\MOZA Pit House\\bin\\MOZA Pit House.exe",
+      "notes": "Registry stores exe path under HKCU. Version read directly from exe. Also covers MOZA pedals."
+    },
+    "simucube_tuner": {
+      "label": "Simucube Tuner",
+      "approved_version": "3.1.3",
+      "minimum_version": "3.1.3",
+      "exe_name": "sc-tuner.exe",
+      "install_path_hint": "C:\\Program Files\\SimucubeTuner",
+      "update_url": "https://simucube.com/en-us/simucube-tuner-3-0-software/",
+      "notes": "Version read from version file in install directory. Covers Simucube wheelbase and Active Pedals."
+    },
+    "fanatec_app": {
+      "label": "Fanatec App",
+      "approved_version": "1.5.1+2",
+      "minimum_version": "1.5.1+2",
+      "exe_name": "Fanatec.exe",
+      "install_path_hint": "C:\\Program Files\\Fanatec\\FanatecUI\\UI",
+      "update_url": "https://www.fanatec.com/us/en/s/download-apps-driver",
+      "notes": "Version read from exe. Required for all Fanatec hardware."
+    },
+    "heusinkveld_app": {
+      "label": "Heusinkveld SmartControl",
+      "approved_version": "1.0.0",
+      "minimum_version": "1.0.0",
+      "exe_name": "SmartControl.exe",
+      "registry_key": "HKLM\\SOFTWARE\\Heusinkveld\\HeusinkveldApp",
+      "registry_value": "Version",
+      "install_path_hint": "C:\\Program Files\\Heusinkveld\\SmartControl",
+      "update_url": "https://heusinkveld.com/smartcontrol/",
+      "notes": ""
+    },
+    "simhub": {
+      "label": "SimHub",
+      "approved_version": "9.4.2",
+      "minimum_version": "9.0.0",
+      "exe_name": "SimHubWPF.exe",
+      "registry_key": "HKLM\\SOFTWARE\\SimHub",
+      "registry_value": "Version",
+      "install_path_hint": "C:\\Program Files (x86)\\SimHub",
+      "update_url": "https://www.simhubdash.com/",
+      "notes": ""
+    },
+    "streamdeck": {
+      "label": "Stream Deck",
+      "optional": true,
+      "approved_version": "6.8.0",
+      "minimum_version": "6.5.0",
+      "exe_name": "StreamDeck.exe",
+      "registry_key": "HKLM\\SOFTWARE\\Elgato Systems GmbH\\StreamDeck",
+      "registry_value": "Version",
+      "install_path_hint": "C:\\Program Files\\Elgato\\StreamDeck",
+      "update_url": "https://www.elgato.com/downloads",
+      "notes": "Optional add-on. Only checked on rigs where installed."
+    },
+    "sensit_haptics": {
+      "label": "Sensit Seat Haptics",
+      "optional": true,
+      "approved_version": "0.10.3",
+      "minimum_version": "0.10.3",
+      "exe_name": "simracing.exe",
+      "install_path_hint": "C:\\Program Files\\SensitHaptics SimRacing Cockpit",
+      "update_url": "https://sensithaptics.com/pages/downloads",
+      "notes": "Optional add-on. Only checked on rigs where installed."
     }
-
-# ---------------------------------------------------------------------------
-# Icon extraction helper -- runs in background at startup, not at popup time
-# ---------------------------------------------------------------------------
-
-def _extract_icon_to_base64(exe_path: str) -> str:
-    """Extract the icon from an exe and return it as a base64 PNG data URL.
-    All GDI work happens here in a background thread so the UI is never blocked."""
-    try:
-        import base64
-        import io
-        from PIL import Image
-        import win32gui
-        import win32con
-        import win32ui
-
-        exe = exe_path.replace("/", "\\")
-        if not Path(exe).exists():
-            return ""
-
-        large, small = win32gui.ExtractIconEx(exe, 0)
-        if not large and not small:
-            return ""
-
-        hicon = large[0] if large else small[0]
-
-        # Create a DC and bitmap to draw the icon into
-        hdc = win32ui.CreateDCFromHandle(win32gui.GetDC(0))
-        hbmp = win32ui.CreateBitmap()
-        hbmp.CreateCompatibleBitmap(hdc, 32, 32)
-        hdc_mem = hdc.CreateCompatibleDC()
-        hdc_mem.SelectObject(hbmp)
-        hdc_mem.FillSolidRect((0, 0, 32, 32), win32gui.GetSysColor(win32con.COLOR_WINDOW))
-        win32gui.DrawIconEx(hdc_mem.GetSafeHdc(), 0, 0, hicon, 32, 32, 0, None, win32con.DI_NORMAL)
-
-        # Convert HBITMAP to PIL Image
-        bmpinfo = hbmp.GetInfo()
-        bmpstr = hbmp.GetBitmapBits(True)
-        img = Image.frombuffer("RGB", (bmpinfo["bmWidth"], bmpinfo["bmHeight"]), bmpstr, "raw", "BGRX", 0, 1)
-        img = img.resize((36, 36), Image.LANCZOS)
-
-        # Convert to base64 PNG
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-
-        # Cleanup
-        win32gui.DestroyIcon(hicon)
-        if large:
-            for h in large[1:]: win32gui.DestroyIcon(h)
-        if small:
-            for h in small: win32gui.DestroyIcon(h)
-        hdc_mem.DeleteDC()
-        hdc.DeleteDC()
-
-        return f"data:image/png;base64,{b64}"
-    except Exception as exc:
-        log.warning("_extract_icon_to_base64 failed for %s: %s", exe_path, exc)
-        return ""
-
-
-class PitStopAPI:
-    def __init__(self, app):
-        self._app = app
-        self._win = None
-
-    def run_checks(self):
-        fetch_manifest(force=True)
-        sw = run_checks_func()
-        st = overall_status(sw) if sw else "grey"
-        with self._app._lock:
-            self._app._sw_results = sw
-            self._app._status     = st
-        if self._app._icon:
-            self._app._icon.icon  = make_icon(st)
-            self._app._icon.title = self._app._tooltip()
-            try:
-                self._app._icon.update_menu()
-            except Exception:
-                pass
-        return _results_to_json(sw, [], st)
-
-    def perform_action(self, action: str, key: str = ""):
-        if action:
-            threading.Thread(target=perform_action, args=(action,), daemon=True).start()
-
-    def save_profile(self, profile: dict):
-        """Called by JS after successful login to save customer profile."""
-        try:
-            save_customer_profile(profile)
-            log.info("Customer profile saved: %s", profile.get("name", "unknown"))
-        except Exception as exc:
-            log.warning("Failed to save customer profile: %s", exc)
-
-    def get_saved_profile(self):
-        """Called by JS to check if a customer is already logged in."""
-        return get_customer_profile()
-
-    def logout(self):
-        """Called by JS to clear the saved customer profile."""
-        try:
-            cfg = load_config()
-            cfg.pop("customer_profile", None)
-            save_config(cfg)
-            log.info("Customer logged out")
-        except Exception as exc:
-            log.warning("Logout failed: %s", exc)
-
-    def close_window(self):
-        if self._win:
-            try:
-                self._win.destroy()
-            except Exception:
-                pass
-
-    def toggle_fullscreen(self):
-        if self._win:
-            try:
-                self._win.toggle_fullscreen()
-            except Exception:
-                pass
-
-    def start_drag(self):
-        """Called by JS to initiate window drag (frameless window support)."""
-        if self._win:
-            try:
-                self._win.move_window()
-            except Exception:
-                pass
-
-    def get_app_icon(self, exe_path: str) -> str:
-        """Return cached icon for exe_path. Icons are pre-loaded at startup
-        so this is an instant dict lookup with zero GDI work at popup time."""
-        return self._app._icon_cache.get(exe_path.replace("/", "\\"), "")
-
-    def start_resize(self, direction: str):
-        """Called by JS to initiate window resize from an edge/corner."""
-        if self._win:
-            try:
-                self._win.resize_window(direction)
-            except Exception:
-                pass
-
-
-def open_webview_popup(sw_results, diag_results, status, app):
-    """Open the pywebview popup window with the PitStop UI."""
-    ui_path = Path(sys.argv[0]).resolve().parent / "pitstop_ui.html"
-    if not ui_path.exists():
-        ui_path = Path(__file__).parent / "pitstop_ui.html"
-    if not ui_path.exists():
-        log.error("pitstop_ui.html not found — falling back to tkinter popup")
-        show_popup(sw_results, diag_results, status,
-                   on_check_now=app._on_check_now,
-                   on_view_log=app._on_view_log,
-                   on_quit=app._on_quit)
-        return
-
-    api = PitStopAPI(app)
-    initial_data = _results_to_json(sw_results, diag_results, status)
-
-    import ctypes
-    screen_w = ctypes.windll.user32.GetSystemMetrics(0)
-    screen_h = ctypes.windll.user32.GetSystemMetrics(1)
-    WIN_W, WIN_H = 480, 660
-    x = screen_w - WIN_W - 16
-    y = screen_h - WIN_H - 56
-
-    win = webview.create_window(
-        title="PitStop",
-        url=str(ui_path),
-        js_api=api,
-        width=WIN_W,
-        height=WIN_H,
-        x=x,
-        y=y,
-        resizable=True,
-        frameless=True,
-        on_top=True,
-        background_color="#12121E",
-        min_size=(420, 500),
-    )
-    api._win = win
-    webview.start(debug=False)
-
-
-def show_popup(sw_results: list, diag_results: list, status: str,
-               on_check_now, on_view_log, on_quit):
-    """Open the main PitStop status window (tkinter fallback)."""
-    root = _get_tk_root()
-    win  = tk.Toplevel(root)
-    win.title("PitStop — Podium 1 Racing")
-    win.configure(bg=C_BG)
-    win.resizable(True, True)
-    win.attributes("-topmost", True)
-
-    try:
-        ico_candidates = [
-            Path(sys.argv[0]).resolve().parent / "p1logo.ico",
-            Path(sys.executable).parent / "p1logo.ico",
-            Path(__file__).parent / "p1logo.ico",
-            Path(__file__).parent / "dist" / "p1logo.ico",
-        ]
-        for ico_path in ico_candidates:
-            if ico_path.exists():
-                win.iconbitmap(str(ico_path))
-                break
-    except Exception:
-        pass
-
-    profile_name, _ = get_profile()
-    profile_label   = PROFILE_LABELS.get(profile_name, profile_name)
-
-    f_brand   = tkfont.Font(family="DM Sans", size=13, weight="bold")
-    f_profile = tkfont.Font(family="DM Sans", size=11)
-    f_status  = tkfont.Font(family="DM Sans", size=13, weight="bold")
-    f_label   = tkfont.Font(family="DM Sans", size=12, weight="bold")
-    f_version = tkfont.Font(family="DM Sans", size=11)
-    f_badge   = tkfont.Font(family="DM Sans", size=10, weight="bold")
-    f_tab     = tkfont.Font(family="DM Sans", size=12, weight="bold")
-    f_action  = tkfont.Font(family="DM Sans", size=12)
-    f_diag    = tkfont.Font(family="DM Sans", size=11)
-
-    cfg      = load_config()
-    WINDOW_W = cfg.get("popup_width",  560)
-    WINDOW_H = cfg.get("popup_height", 700)
-
-    # ---- Header ----
-    header = tk.Frame(win, bg=C_PANEL, pady=14)
-    header.pack(fill="x")
-    tk.Label(header, text="PODIUM 1 RACING",
-             font=tkfont.Font(family="Bebas Neue", size=16),
-             bg=C_PANEL, fg="#CC1122", padx=16).pack(side="left")
-    close_btn = tk.Label(header, text="  ×  ", font=tkfont.Font(family="DM Sans", size=16),
-                         bg=C_PANEL, fg=C_MUTED, cursor="hand2", padx=4)
-    close_btn.pack(side="right")
-    close_btn.bind("<Button-1>", lambda e: win.destroy())
-    close_btn.bind("<Enter>", lambda e: close_btn.configure(fg=C_TEXT, bg=C_BORDER))
-    close_btn.bind("<Leave>", lambda e: close_btn.configure(fg=C_MUTED, bg=C_HOVER))
-    tk.Label(header, text=profile_label, font=f_profile,
-             bg=C_PANEL, fg=C_MUTED, padx=4).pack(side="right")
-    tk.Frame(win, bg=C_BORDER, height=1).pack(fill="x")
-
-    # ---- Status banner ----
-    sw_issues    = len([r for r in sw_results if r.status == "warning" or
-                        (r.status == "error" and r.installed != "Not installed")])
-    diag_issues  = len([r for r in diag_results if r.severity == "critical"])
-    total_issues = sw_issues + diag_issues
-    status_color = {"green": C_GREEN, "yellow": C_YELLOW,
-                    "red": C_RED, "grey": C_GREY}.get(status, C_GREY)
-    status_text  = "All systems go — ready to race" if total_issues == 0 else "Needs attention"
-
-    banner = tk.Frame(win, bg=C_BG, pady=10, padx=20)
-    banner.pack(fill="x")
-    status_dot = tk.Canvas(banner, width=14, height=14, bg=C_BG, highlightthickness=0)
-    status_dot.pack(side="left", padx=(0, 8))
-    status_dot.create_oval(1, 1, 13, 13, fill=status_color, outline="", tags="dot")
-    status_lbl = tk.Label(banner, text=status_text, font=f_status, bg=C_BG, fg=status_color)
-    status_lbl.pack(side="left")
-    if total_issues > 0:
-        pills = tk.Frame(banner, bg=C_BG)
-        pills.pack(side="right")
-        if sw_issues > 0:
-            sw_pill = tk.Frame(pills, bg=C_YELLOW, padx=8, pady=2)
-            sw_pill.pack(side="left", padx=(0, 4))
-            tk.Label(sw_pill, text=f"Software: {sw_issues}",
-                     font=tkfont.Font(family="DM Sans", size=8, weight="bold"),
-                     bg=C_YELLOW, fg="#1A1A2E").pack()
-        if diag_issues > 0:
-            dg_color = C_RED
-            dg_pill  = tk.Frame(pills, bg=dg_color, padx=8, pady=2)
-            dg_pill.pack(side="left")
-            tk.Label(dg_pill, text=f"Diagnostics: {diag_issues}",
-                     font=tkfont.Font(family="DM Sans", size=8, weight="bold"),
-                     bg=dg_color, fg="#1A1A2E").pack()
-
-    tk.Frame(win, bg=C_BORDER, height=1).pack(fill="x")
-
-    # ---- Tabs ----
-    tab_frame = tk.Frame(win, bg=C_HOVER)
-    tab_frame.pack(fill="x")
-
-    def make_scroll_frame(parent):
-        outer  = tk.Frame(parent, bg=C_BG)
-        canvas = tk.Canvas(outer, bg=C_BG, highlightthickness=0)
-        style_frame = tk.Frame(outer, bg=C_BORDER, width=6)
-        style_frame.pack(side="right", fill="y")
-        style_frame.pack_propagate(False)
-        scrollbar = tk.Scrollbar(style_frame, orient="vertical", command=canvas.yview,
-                                 bg=C_MUTED, troughcolor=C_BORDER, activebackground=C_TEXT,
-                                 relief="flat", bd=0, width=6, highlightthickness=0,
-                                 elementborderwidth=0)
-        canvas.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(fill="both", expand=True)
-        canvas.pack(side="left", fill="both", expand=True)
-        inner    = tk.Frame(canvas, bg=C_BG)
-        inner_id = canvas.create_window((0, 0), window=inner, anchor="nw")
-
-        def on_configure(e):
-            bbox = canvas.bbox("all")
-            if bbox:
-                canvas_h  = canvas.winfo_height()
-                content_h = bbox[3] - bbox[1]
-                if content_h <= canvas_h:
-                    canvas.configure(scrollregion=(0, 0, 0, canvas_h))
-                else:
-                    canvas.configure(scrollregion=bbox)
-            canvas.itemconfig(inner_id, width=canvas.winfo_width())
-
-        inner.bind("<Configure>", on_configure)
-        canvas.bind("<Configure>",
-                    lambda e: (canvas.itemconfig(inner_id, width=e.width), on_configure(e)))
-
-        def on_mousewheel(e):
-            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
-
-        canvas._mw_handler = on_mousewheel
-        return outer, canvas, inner
-
-    sw_outer,   sw_canvas,   sw_inner_scroll   = make_scroll_frame(win)
-    diag_outer, diag_canvas, diag_inner_scroll = make_scroll_frame(win)
-    active_tab = {"current": "software"}
-
-    def _bind_mousewheel(canvas):
-        win.bind_all("<MouseWheel>", canvas._mw_handler)
-
-    def switch_tab(name):
-        active_tab["current"] = name
-        if name == "software":
-            diag_outer.pack_forget()
-            sw_outer.pack(fill="both", expand=True)
-            _bind_mousewheel(sw_canvas)
-            sw_canvas.yview_moveto(0)
-            tab_sw.configure(bg=C_BG, fg=C_TEXT, relief="flat", bd=0)
-            tab_diag.configure(bg=C_PANEL, fg=C_MUTED, relief="flat", bd=0)
-        else:
-            sw_outer.pack_forget()
-            diag_outer.pack(fill="both", expand=True)
-            _bind_mousewheel(diag_canvas)
-            diag_canvas.yview_moveto(0)
-            tab_sw.configure(bg=C_PANEL, fg=C_MUTED, relief="flat", bd=0)
-            tab_diag.configure(bg=C_BG, fg=C_TEXT, relief="flat", bd=0)
-
-    tab_sw = tk.Label(tab_frame, text="Software", font=f_tab,
-                      bg=C_BG, fg=C_TEXT, pady=9, cursor="hand2")
-    tab_sw.pack(side="left", expand=True, fill="x")
-    tab_sw.bind("<Button-1>", lambda e: switch_tab("software"))
-    tab_diag = tk.Label(tab_frame, text="Diagnostics", font=f_tab,
-                        bg=C_PANEL, fg=C_MUTED, pady=9, cursor="hand2")
-    tab_diag.pack(side="left", expand=True, fill="x")
-    tab_diag.bind("<Button-1>", lambda e: switch_tab("diag"))
-    tk.Frame(win, bg=C_BORDER, height=1).pack(fill="x")
-    sw_outer.pack(fill="both", expand=True)
-    _bind_mousewheel(sw_canvas)
-
-    # ---- Software tab rows ----
-    def build_sw_row(parent, r):
-        row_color = _sw_badge_color(r)
-        badge_txt = STATUS_BADGES.get(r.status, "UNKNOWN")
-        if r.status == "unknown" and r.installed == "Not installed":
-            badge_txt = "MISSING"
-        row = tk.Frame(parent, bg=C_BG, pady=8, padx=20)
-        row.pack(fill="x")
-        dot_c = tk.Canvas(row, width=8, height=8, bg=C_BG, highlightthickness=0)
-        dot_c.pack(side="left", padx=(0, 10), pady=4)
-        dot_c.create_oval(1, 1, 7, 7, fill=row_color, outline="")
-        badge_frame = tk.Frame(row, bg=row_color, padx=8, pady=3)
-        badge_frame.pack(side="right", padx=(8, 0))
-        tk.Label(badge_frame, text=badge_txt, font=f_badge,
-                 bg=row_color, fg="#1A1A2E").pack()
-        info = tk.Frame(row, bg=C_BG)
-        info.pack(side="left", fill="x", expand=True)
-        tk.Label(info, text=r.label, font=f_label, bg=C_BG, fg=C_TEXT, anchor="w").pack(anchor="w")
-        ver_text = f"{r.installed}  \u2192  {r.required}" if r.status == "warning" else r.installed
-        tk.Label(info, text=ver_text, font=f_version, bg=C_BG, fg=C_MUTED, anchor="w").pack(anchor="w")
-
-        if r.action:
-            def _bind_click(widget, a):
-                try:
-                    widget.bind("<Button-1>", lambda e, x=a: perform_action(x))
-                    widget.configure(cursor="hand2")
-                except Exception:
-                    pass
-                for child in widget.winfo_children():
-                    _bind_click(child, a)
-            row.after(10, lambda w=row, a=r.action: _bind_click(w, a))
-
-        def on_enter(e, f=row, bf=badge_frame):
-            f.configure(bg=C_HOVER)
-            for w in f.winfo_children():
-                if w is bf: continue
-                try: w.configure(bg=C_HOVER)
-                except Exception: pass
-                for ww in w.winfo_children():
-                    try: ww.configure(bg=C_HOVER)
-                    except Exception: pass
-
-        def on_leave(e, f=row, bf=badge_frame):
-            f.configure(bg=C_BG)
-            for w in f.winfo_children():
-                if w is bf: continue
-                try: w.configure(bg=C_BG)
-                except Exception: pass
-                for ww in w.winfo_children():
-                    try: ww.configure(bg=C_BG)
-                    except Exception: pass
-
-        row.bind("<Enter>", on_enter)
-        row.bind("<Leave>", on_leave)
-
-    def _build_sw_content(parent, results):
-        for w in parent.winfo_children():
-            w.destroy()
-        inner = tk.Frame(parent, bg=C_BG, pady=4)
-        inner.pack(fill="x")
-        sw_info = tk.Frame(inner, bg="#0D1820", padx=12, pady=8)
-        sw_info.pack(fill="x", padx=14, pady=(8, 4))
-        tk.Frame(sw_info, bg="#1A3A5A", width=3).pack(side="left", fill="y", padx=(0, 10))
-        sw_info_text = tk.Frame(sw_info, bg="#0D1820")
-        sw_info_text.pack(side="left", fill="x", expand=True)
-        tk.Label(sw_info_text, text="Your Podium 1 software",
-                 font=tkfont.Font(family="DM Sans", size=11, weight="bold"),
-                 bg="#0D1820", fg="#60A5FA", anchor="w").pack(anchor="w")
-        tk.Label(sw_info_text,
-                 text="These are the apps that keep your rig running. Click any item to open it. Yellow or red means an update is needed.",
-                 font=tkfont.Font(family="DM Sans", size=10),
-                 bg="#0D1820", fg="#4A7A9B", anchor="w",
-                 wraplength=420, justify="left").pack(anchor="w")
-        tk.Label(inner, text="COMPONENTS",
-                 font=tkfont.Font(family="DM Sans", size=9),
-                 bg=C_BG, fg="#6B6560", anchor="w", padx=20).pack(anchor="w", pady=(8, 2))
-        for r in results:
-            build_sw_row(inner, r)
-
-    _build_sw_content(sw_inner_scroll, sw_results)
-
-    # ---- Diagnostics tab rows ----
-    def build_diag_row(parent, r):
-        sev_color = DIAG_COLORS.get(r.severity, C_GREY)
-        badge_txt = DIAG_BADGES.get(r.severity, "INFO")
-        row = tk.Frame(parent, bg=C_BG, pady=10, padx=20)
-        row.pack(fill="x")
-        dot_c = tk.Canvas(row, width=8, height=8, bg=C_BG, highlightthickness=0)
-        dot_c.pack(side="left", padx=(0, 10), pady=2, anchor="n")
-        dot_c.create_oval(1, 1, 7, 7, fill=sev_color, outline="")
-        top = tk.Frame(row, bg=C_BG)
-        top.pack(fill="x")
-        badge_frame = tk.Frame(top, bg=sev_color, padx=8, pady=3)
-        badge_frame.pack(side="right", padx=(8, 0))
-        tk.Label(badge_frame, text=badge_txt, font=f_badge,
-                 bg=sev_color, fg="#1A1A2E").pack()
-        tk.Label(top, text=r.title, font=f_label, bg=C_BG, fg=C_TEXT, anchor="w").pack(side="left", fill="x", expand=True)
-        desc_lbl = tk.Label(row, text=r.description, font=f_diag,
-                            bg=C_BG, fg=C_MUTED, anchor="w", wraplength=440, justify="left")
-        desc_lbl.pack(fill="x", padx=(18, 8))
-
-        def _update_wrap(e, lbl=desc_lbl):
-            lbl.configure(wraplength=max(100, e.width - 28))
-        row.bind("<Configure>", _update_wrap)
-
-        if r.timestamp:
-            tk.Label(row, text=r.timestamp, font=f_version,
-                     bg=C_BG, fg="#6B6560", anchor="w").pack(fill="x", padx=(18, 8))
-
-        def on_enter(e, f=row, bf=badge_frame):
-            f.configure(bg=C_HOVER)
-            for w in f.winfo_children():
-                if w is bf: continue
-                try: w.configure(bg=C_HOVER)
-                except Exception: pass
-                for ww in w.winfo_children():
-                    if ww is bf: continue
-                    try: ww.configure(bg=C_HOVER)
-                    except Exception: pass
-
-        def on_leave(e, f=row, bf=badge_frame):
-            f.configure(bg=C_BG)
-            for w in f.winfo_children():
-                if w is bf: continue
-                try: w.configure(bg=C_BG)
-                except Exception: pass
-                for ww in w.winfo_children():
-                    if ww is bf: continue
-                    try: ww.configure(bg=C_BG)
-                    except Exception: pass
-
-        row.bind("<Enter>", on_enter)
-        row.bind("<Leave>", on_leave)
-
-    def _build_diag_content(parent, results):
-        for w in parent.winfo_children():
-            w.destroy()
-        inner = tk.Frame(parent, bg=C_BG)
-        inner.pack(fill="x")
-        dg_info = tk.Frame(inner, bg="#0D1810", padx=12, pady=8)
-        dg_info.pack(fill="x", padx=14, pady=(8, 4))
-        tk.Frame(dg_info, bg="#1A3A1A", width=3).pack(side="left", fill="y", padx=(0, 10))
-        dg_info_text = tk.Frame(dg_info, bg="#0D1810")
-        dg_info_text.pack(side="left", fill="x", expand=True)
-        tk.Label(dg_info_text, text="System health monitor",
-                 font=tkfont.Font(family="DM Sans", size=11, weight="bold"),
-                 bg="#0D1810", fg="#2ECC71", anchor="w").pack(anchor="w")
-        tk.Label(dg_info_text,
-                 text="PitStop monitors your rig 24/7 for crashes, USB drops, overheating, and other issues that can interrupt your session.",
-                 font=tkfont.Font(family="DM Sans", size=10),
-                 bg="#0D1810", fg="#3A8A6A", anchor="w",
-                 wraplength=420, justify="left").pack(anchor="w")
-        checked_time = datetime.now().strftime("Last checked %b %d at %I:%M %p")
-        tk.Label(inner, text=checked_time.upper(),
-                 font=tkfont.Font(family="DM Sans", size=9),
-                 bg=C_BG, fg="#6B6560", anchor="w", padx=20).pack(anchor="w", pady=(8, 2))
-        if results:
-            order = {"critical": 0, "warning": 1, "info": 2, "clear": 3}
-            sorted_diags = sorted(results, key=lambda r: order.get(r.severity, 4))
-            for r in sorted_diags:
-                build_diag_row(inner, r)
-        else:
-            tk.Label(inner, text="Running diagnostics...", font=f_version,
-                     bg=C_BG, fg=C_MUTED, padx=16, pady=12).pack(anchor="w")
-
-    _build_diag_content(diag_inner_scroll, diag_results)
-
-    # ---- Footer ----
-    tk.Frame(win, bg=C_BORDER, height=1).pack(fill="x")
-    footer = tk.Frame(win, bg=C_BG, pady=4)
-    footer.pack(fill="x")
-
-    def make_footer_btn(parent, text, command):
-        btn = tk.Label(parent, text=text, font=f_action,
-                       bg=C_BG, fg=C_MUTED, padx=20, pady=10, cursor="hand2", anchor="w")
-        btn.pack(fill="x")
-        btn.bind("<Button-1>", lambda e: command())
-        btn.bind("<Enter>", lambda e: btn.configure(bg=C_BTN_HOVER, fg=C_TEXT))
-        btn.bind("<Leave>", lambda e: btn.configure(bg=C_BG, fg=C_MUTED))
-        return btn
-
-    def do_check_now():
-        win.destroy()
-        on_check_now()
-
-    make_footer_btn(footer, "Check now",    do_check_now)
-    make_footer_btn(footer, "View log",     on_view_log)
-    make_footer_btn(footer, "Quit PitStop", lambda: [win.destroy(), on_quit()])
-
-    # ---- Save size on close ----
-    def on_close():
-        try:
-            cfg = load_config()
-            cfg["popup_width"]  = win.winfo_width()
-            cfg["popup_height"] = win.winfo_height()
-            save_config(cfg)
-        except Exception:
-            pass
-        win.destroy()
-
-    win.protocol("WM_DELETE_WINDOW", on_close)
-
-    # ---- Position: bottom-right above taskbar ----
-    win.update_idletasks()
-    sw = win.winfo_screenwidth()
-    sh = win.winfo_screenheight()
-    x  = sw - WINDOW_W - 16
-    y  = sh - WINDOW_H - 56
-    win.geometry(f"{WINDOW_W}x{WINDOW_H}+{x}+{y}")
-    win.minsize(400, 400)
-
-    def _apply_refresh(new_sw, new_diag, new_st):
-        try:
-            if not win.winfo_exists():
-                return
-            for widget in sw_inner_scroll.winfo_children():
-                widget.destroy()
-            for widget in diag_inner_scroll.winfo_children():
-                widget.destroy()
-            _build_sw_content(sw_inner_scroll, new_sw)
-            _build_diag_content(diag_inner_scroll, new_diag)
-            new_sw_issues   = len([r for r in new_sw if r.status == "warning" or
-                                   (r.status == "error" and r.installed != "Not installed")])
-            new_diag_issues = len([r for r in new_diag if r.severity == "critical"])
-            new_color = {"green": C_GREEN, "yellow": C_YELLOW,
-                         "red": C_RED, "grey": C_GREY}.get(new_st, C_GREY)
-            status_dot.itemconfig("all", fill=new_color)
-            if new_sw_issues == 0 and new_diag_issues == 0:
-                status_lbl.configure(text="All systems go — ready to race", fg=new_color)
-            else:
-                status_lbl.configure(text="Needs attention", fg=new_color)
-        except Exception as exc:
-            log.warning("Refresh apply failed: %s", exc)
-
-    def _do_refresh():
-        try:
-            fetch_manifest(force=True)
-            new_sw = run_checks_func()
-            new_st = overall_status(new_sw) if new_sw else "grey"
-            try:
-                win.after(0, lambda: _apply_refresh(new_sw, [], new_st))
-            except Exception:
-                pass
-        except Exception as exc:
-            log.warning("Background refresh failed: %s", exc)
-
-    _refresh_running = {"active": False}
-
-    def _on_focus_in(e):
-        if _refresh_running["active"]:
-            return
-        _refresh_running["active"] = True
-        def _run():
-            _do_refresh()
-            _refresh_running["active"] = False
-        threading.Thread(target=_run, daemon=True).start()
-
-    win.bind("<FocusIn>", _on_focus_in)
-    root.wait_window(win)
-
-
-# ---------------------------------------------------------------------------
-# Tray application
-# ---------------------------------------------------------------------------
-
-class PitStopApp:
-    def __init__(self):
-        self._sw_results = []
-        self._status     = "grey"
-        self._lock       = threading.Lock()
-        self._icon       = None
-        self._stop_event = threading.Event()
-        self._tk_queue   = []
-        self._tk_lock    = threading.Lock()
-        self._icon_cache = {}  # exe_path -> base64 data URL, populated at startup
-
-    def _cache_icons(self):
-        """Run once at startup in a background thread.
-        Pre-extracts all app icons so get_app_icon() is an instant cache hit."""
-        try:
-            manifest = fetch_manifest()
-            components = manifest.get("components", {})
-            profile_name, enabled_addons = get_profile()
-            profiles_def = manifest.get("profiles", {})
-            addons_def   = manifest.get("addons", {})
-            active_keys  = list(profiles_def.get(profile_name, {}).get("components", []))
-            for addon_key in enabled_addons:
-                comp_key = addons_def.get(addon_key, {}).get("component")
-                if comp_key and comp_key not in active_keys:
-                    active_keys.append(comp_key)
-            for key in active_keys:
-                comp = components.get(key, {})
-                hint = comp.get("install_path_hint", "")
-                exe  = comp.get("exe_name", "")
-                if hint and exe:
-                    exe_path = str(Path(hint) / exe)
-                    if Path(exe_path).exists():
-                        result = _extract_icon_to_base64(exe_path)
-                        if result:
-                            self._icon_cache[exe_path] = result
-                            log.info("Icon cached for %s", key)
-        except Exception as exc:
-            log.warning("Icon cache build failed: %s", exc)
-
-    def _check_loop(self):
-        while not self._stop_event.is_set():
-            log.info("Starting check cycle...")
-            sw_results = run_checks_func()
-            status     = overall_status(sw_results) if sw_results else "grey"
-            with self._lock:
-                self._sw_results = sw_results
-                self._status     = status
-            if self._icon:
-                self._icon.icon  = make_icon(status)
-                self._icon.title = self._tooltip()
-                self._icon.menu  = self._build_tray_menu()
-                try:
-                    self._icon.update_menu()
-                except Exception:
-                    pass
-            log.info("Check cycle complete — status=%s", status)
-            self._stop_event.wait(CHECK_INTERVAL_SECONDS)
-
-    def _tooltip(self) -> str:
-        with self._lock:
-            sw = list(self._sw_results)
-        issues = [r.label for r in sw if r.status in ("warning", "error")]
-        if not issues:
-            return "PitStop — All systems go"
-        return "PitStop — Needs attention: " + ", ".join(issues[:3])
-
-    def _build_tray_menu(self) -> Menu:
-        return Menu(
-            item("Open PitStop", self._on_open_popup, default=True),
-            Menu.SEPARATOR,
-            item("Check now", self._on_check_now),
-            item("View log",  self._on_view_log),
-            item("Quit",      self._on_quit),
-        )
-
-    def _on_open_popup(self, icon=None, menu_item=None):
-        threading.Thread(target=self._refresh_and_open, daemon=True).start()
-
-    def _refresh_and_open(self):
-        fetch_manifest(force=True)
-        sw_results = run_checks_func()
-        status     = overall_status(sw_results) if sw_results else "grey"
-        with self._lock:
-            self._sw_results = sw_results
-            self._status     = status
-        if self._icon:
-            self._icon.icon  = make_icon(status)
-            self._icon.title = self._tooltip()
-            try:
-                self._icon.update_menu()
-            except Exception:
-                pass
-        with self._tk_lock:
-            self._tk_queue.append(("webview", sw_results, [], status))
-
-    def _on_check_now(self, icon=None, menu_item=None):
-        self._stop_event.set()
-        self._stop_event.clear()
-        threading.Thread(target=self._check_loop, daemon=True).start()
-
-    def _on_view_log(self, icon=None, menu_item=None):
-        subprocess.Popen(["notepad.exe", str(LOG_FILE)],
-                         creationflags=subprocess.CREATE_NO_WINDOW)
-
-    def _on_quit(self, icon=None, menu_item=None):
-        log.info("PitStop exiting.")
-        self._stop_event.set()
-        if self._icon:
-            self._icon.stop()
-
-    def _tk_pump(self):
-        with self._tk_lock:
-            pending = list(self._tk_queue)
-            self._tk_queue.clear()
-        for msg in pending:
-            if msg[0] == "webview":
-                _, sw, diag, st = msg
-                open_webview_popup(sw, diag, st, app=self)
-
-
-    def run(self):
-        log.info("PitStop starting — profile: %s, addons: %s", *get_profile())
-        global _tk_root
-        _tk_root = tk.Tk()
-        _tk_root.withdraw()
-        threading.Thread(target=self._check_loop, daemon=True).start()
-        threading.Thread(target=self._cache_icons, daemon=True).start()
-        self._icon = pystray.Icon(
-            name="PitStop",
-            icon=make_icon("grey"),
-            title="PitStop — Starting...",
-            menu=self._build_tray_menu(),
-        )
-        tray_thread = threading.Thread(target=self._icon.run, daemon=True)
-        tray_thread.start()
-        while tray_thread.is_alive():
-            try:
-                _tk_root.update()
-            except Exception:
-                pass
-            self._tk_pump()
-            time.sleep(0.05)
-        log.info("PitStop exited.")
-
-
-if __name__ == "__main__":
-    import socket
-    _lock_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        _lock_socket.bind(("127.0.0.1", 49152))
-    except OSError:
-        log.warning("PitStop already running — exiting.")
-        sys.exit(0)
-    app = PitStopApp()
-    app.run()
+  },
+  "profiles": {
+    "dev": {
+      "label": "Dev Machine",
+      "components": [
+        "nvidia_driver",
+        "windows_update"
+      ]
+    },
+    "all-apps-build": {
+      "label": "All Apps Test",
+      "components": [
+        "nvidia_driver",
+        "windows_update",
+        "asetek_racehub",
+        "moza_pithouse",
+        "simucube_tuner",
+        "fanatec_app",
+        "heusinkveld_app",
+        "simhub",
+        "streamdeck",
+        "sensit_haptics"
+      ]
+    },
+    "asetek-build": {
+      "label": "Asetek + Heusinkveld",
+      "components": [
+        "nvidia_driver",
+        "windows_update",
+        "asetek_racehub",
+        "heusinkveld_app",
+        "simhub"
+      ]
+    },
+    "asetek-moza-pedals-build": {
+      "label": "Asetek + MOZA Pedals",
+      "components": [
+        "nvidia_driver",
+        "windows_update",
+        "asetek_racehub",
+        "moza_pithouse",
+        "simhub"
+      ]
+    },
+    "asetek-simucube-pedals-build": {
+      "label": "Asetek + Simucube Pedals",
+      "components": [
+        "nvidia_driver",
+        "windows_update",
+        "asetek_racehub",
+        "simucube_tuner",
+        "simhub"
+      ]
+    },
+    "moza-build": {
+      "label": "MOZA Wheelbase + Pedals",
+      "components": [
+        "nvidia_driver",
+        "windows_update",
+        "moza_pithouse",
+        "simhub"
+      ]
+    },
+    "moza-heusinkveld-build": {
+      "label": "MOZA + Heusinkveld",
+      "components": [
+        "nvidia_driver",
+        "windows_update",
+        "moza_pithouse",
+        "heusinkveld_app",
+        "simhub"
+      ]
+    },
+    "moza-simucube-pedals-build": {
+      "label": "MOZA + Simucube Pedals",
+      "components": [
+        "nvidia_driver",
+        "windows_update",
+        "moza_pithouse",
+        "simucube_tuner",
+        "simhub"
+      ]
+    },
+    "simucube-build": {
+      "label": "Simucube Wheelbase + Pedals",
+      "components": [
+        "nvidia_driver",
+        "windows_update",
+        "simucube_tuner",
+        "simhub"
+      ]
+    },
+    "simucube-heusinkveld-build": {
+      "label": "Simucube + Heusinkveld",
+      "components": [
+        "nvidia_driver",
+        "windows_update",
+        "simucube_tuner",
+        "heusinkveld_app",
+        "simhub"
+      ]
+    },
+    "simucube-moza-pedals-build": {
+      "label": "Simucube + MOZA Pedals",
+      "components": [
+        "nvidia_driver",
+        "windows_update",
+        "simucube_tuner",
+        "moza_pithouse",
+        "simhub"
+      ]
+    },
+    "fanatec-build": {
+      "label": "Fanatec + Heusinkveld",
+      "components": [
+        "nvidia_driver",
+        "windows_update",
+        "fanatec_app",
+        "heusinkveld_app",
+        "simhub"
+      ]
+    },
+    "fanatec-moza-pedals-build": {
+      "label": "Fanatec + MOZA Pedals",
+      "components": [
+        "nvidia_driver",
+        "windows_update",
+        "fanatec_app",
+        "moza_pithouse",
+        "simhub"
+      ]
+    },
+    "fanatec-simucube-pedals-build": {
+      "label": "Fanatec + Simucube Pedals",
+      "components": [
+        "nvidia_driver",
+        "windows_update",
+        "fanatec_app",
+        "simucube_tuner",
+        "simhub"
+      ]
+    }
+  },
+  "addons": {
+    "streamdeck": {
+      "label": "Stream Deck",
+      "component": "streamdeck"
+    },
+    "sensit": {
+      "label": "Sensit Seat Haptics",
+      "component": "sensit_haptics"
+    }
+  },
+  "alerts": []
+}
