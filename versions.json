@@ -60,8 +60,8 @@
     },
     "heusinkveld_app": {
       "label": "Heusinkveld SmartControl",
-      "approved_version": "1.0.0",
-      "minimum_version": "1.0.0",
+      "approved_version": "26.02.5",
+      "minimum_version": "26.02.5",
       "exe_name": "SmartControl.exe",
       "registry_key": "HKLM\\SOFTWARE\\Heusinkveld\\HeusinkveldApp",
       "registry_value": "Version",
