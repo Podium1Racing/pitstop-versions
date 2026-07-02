@@ -71,8 +71,8 @@
     },
     "simhub": {
       "label": "SimHub",
-      "approved_version": "9.4.2",
-      "minimum_version": "9.0.0",
+      "approved_version": "9.11.21",
+      "minimum_version": "9.11.17",
       "exe_name": "SimHubWPF.exe",
       "registry_key": "HKLM\\SOFTWARE\\SimHub",
       "registry_value": "Version",
