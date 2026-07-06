@@ -63,11 +63,11 @@
       "approved_version": "26.02.5",
       "minimum_version": "26.02.5",
       "exe_name": "SmartControl.exe",
-      "registry_key": "HKLM\\SOFTWARE\\Heusinkveld\\HeusinkveldApp",
-      "registry_value": "Version",
-      "install_path_hint": "C:\\Program Files\\Heusinkveld\\SmartControl",
+      "registry_key": "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{4381C042-B66C-4D02-8337-8C85EEDC4ABF}_is1",
+      "registry_value": "DisplayVersion",
+      "install_path_hint": "C:\\Program Files\\Heusinkveld\\SmartControl Live",
       "update_url": "https://heusinkveld.com/smartcontrol/",
-      "notes": ""
+      "notes": "Version read from DisplayVersion in Inno Setup uninstall registry key."
     },
     "simhub": {
       "label": "SimHub",
