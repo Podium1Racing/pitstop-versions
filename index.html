@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PitStop Version Manager — Podium 1 Racing</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;1,9..40,400&family=Bebas+Neue&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#080808;--surface:#111;--surface-2:#181818;--surface-3:#1f1f1f;
+  --bd:rgba(255,252,246,.08);--bd-strong:rgba(255,252,246,.14);
+  --text:#FFFCF6;--dim:rgba(255,252,246,.55);--muted:rgba(255,252,246,.28);
+  --red:#CC1122;--red-dim:rgba(204,17,34,.12);--red-bd:rgba(204,17,34,.28);
+  --green:#34D77E;--green-dim:rgba(52,215,126,.12);--green-bd:rgba(52,215,126,.28);
+  --amber:#F6A93B;--amber-dim:rgba(246,169,59,.12);--amber-bd:rgba(246,169,59,.28);
+  --blue:#5BA8FF;
+  --radius:6px;
+}
+body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;font-size:14px;line-height:1.5}
+a{color:var(--dim);text-decoration:none}a:hover{color:var(--text)}
+code{font-family:monospace;font-size:12px;color:var(--dim)}
+
+/* Modal */
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.88);display:flex;align-items:center;justify-content:center;z-index:200}
+.overlay.hidden{display:none}
+.modal{background:var(--surface);border:1px solid var(--bd-strong);border-radius:12px;padding:32px;width:440px;max-width:92vw}
+.modal-logo{font-family:'Bebas Neue',sans-serif;font-size:11px;letter-spacing:.12em;color:var(--muted);margin-bottom:20px}
+.modal h2{font-family:'Bebas Neue',sans-serif;font-size:24px;letter-spacing:.04em;margin-bottom:6px}
+.modal-desc{font-size:13px;color:var(--dim);margin-bottom:22px;line-height:1.65}
+.field{margin-bottom:14px}
+.field label{display:block;font-size:11px;color:var(--dim);margin-bottom:5px;letter-spacing:.03em}
+.field input{width:100%;padding:9px 12px;background:var(--bg);border:1px solid var(--bd-strong);border-radius:var(--radius);color:var(--text);font-size:13px;font-family:monospace;outline:none;transition:border-color .15s}
+.field input:focus{border-color:var(--red)}
+.field-hint{font-size:11px;color:var(--muted);margin-top:5px}
+.field-hint a{color:var(--muted);text-decoration:underline;text-decoration-color:rgba(255,252,246,.2)}
+
+/* Buttons */
+.btn{display:inline-flex;align-items:center;gap:5px;padding:7px 13px;border-radius:var(--radius);font-size:12px;font-family:'DM Sans',sans-serif;cursor:pointer;border:1px solid var(--bd-strong);background:transparent;color:var(--text);transition:background .12s,border-color .12s;white-space:nowrap;line-height:1}
+.btn:hover:not(:disabled){background:var(--surface-2)}
+.btn:active:not(:disabled){transform:scale(.98)}
+.btn:disabled{opacity:.35;cursor:not-allowed}
+.btn-primary{background:var(--red);border-color:var(--red);color:#fff}
+.btn-primary:hover:not(:disabled){background:#a80e1b;border-color:#a80e1b}
+.btn-approve{background:var(--green-dim);border-color:var(--green-bd);color:var(--green)}
+.btn-approve:hover:not(:disabled){background:rgba(52,215,126,.2)}
+.btn-full{width:100%;justify-content:center;padding:10px}
+.btn-sm{padding:5px 10px;font-size:11px}
+
+/* Header */
+header{border-bottom:1px solid var(--bd);padding:14px 24px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;background:rgba(8,8,8,.95);backdrop-filter:blur(8px);z-index:10}
+.logo{display:flex;align-items:center;gap:10px}
+.logo-mark{width:30px;height:30px;background:var(--red);border-radius:6px;display:flex;align-items:center;justify-content:center;font-family:'Bebas Neue';font-size:15px;color:#fff;flex-shrink:0;letter-spacing:.03em}
+.logo-name{font-family:'Bebas Neue',sans-serif;font-size:16px;letter-spacing:.06em;line-height:1.1}
+.logo-sub{font-size:10px;color:var(--muted);letter-spacing:.04em}
+.header-right{display:flex;gap:8px;align-items:center}
+
+/* Settings panel */
+.settings-panel{background:var(--surface);border:1px solid var(--bd-strong);border-radius:10px;padding:20px 22px;margin-bottom:20px}
+.settings-panel.hidden{display:none}
+.settings-title{font-size:13px;font-weight:500;margin-bottom:16px;color:var(--dim)}
+.settings-row{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end}
+
+/* Container */
+.wrap{max-width:780px;margin:0 auto;padding:24px}
+
+/* Status bar */
+.status-bar{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;gap:12px;flex-wrap:wrap}
+.status-text{font-size:13px;color:var(--dim)}
+
+/* Badge */
+.badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:3px;font-size:11px;font-weight:500;line-height:1.4}
+.badge-green{background:var(--green-dim);color:var(--green);border:1px solid var(--green-bd)}
+.badge-amber{background:var(--amber-dim);color:var(--amber);border:1px solid var(--amber-bd)}
+.badge-red{background:var(--red-dim);color:#ff5566;border:1px solid var(--red-bd)}
+.badge-muted{background:rgba(255,252,246,.04);color:var(--muted);border:1px solid var(--bd)}
+
+/* App list */
+.app-list{border:1px solid var(--bd);border-radius:10px;overflow:hidden}
+.app-row{border-bottom:1px solid var(--bd)}
+.app-row:last-child{border-bottom:none}
+.row-header{display:flex;align-items:center;gap:12px;padding:12px 16px;transition:background .1s}
+.row-header:hover{background:rgba(255,252,246,.025)}
+.app-info{flex:1;min-width:0}
+.app-name{font-size:13px;font-weight:500;display:flex;align-items:center;gap:7px}
+.tag-optional{font-size:10px;color:var(--muted);border:1px solid var(--bd);padding:1px 5px;border-radius:3px;font-weight:400}
+.app-ver{font-size:11px;color:var(--dim);margin-top:2px;font-family:monospace}
+.app-ver .arrow{color:var(--muted);margin:0 4px}
+.app-ver .new-v{color:var(--amber);font-weight:500}
+.app-ver .approved-v{color:var(--green)}
+.row-actions{display:flex;align-items:center;gap:8px}
+
+/* Research panel */
+.research-panel{border-top:1px solid var(--bd);padding:14px 16px;background:rgba(255,252,246,.015)}
+.r-loading{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--dim);padding:4px 0}
+.r-summary{font-size:13px;color:var(--text);line-height:1.65;margin-bottom:14px}
+.r-cols{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:14px}
+.r-col-title{font-size:11px;font-weight:500;margin-bottom:6px;letter-spacing:.02em}
+.r-col-title.pos{color:var(--green)}
+.r-col-title.neg{color:var(--amber)}
+.r-point{display:flex;gap:6px;margin-bottom:5px;font-size:12px;line-height:1.45;color:var(--text)}
+.r-point svg{flex-shrink:0;margin-top:2px}
+.r-footer{display:flex;align-items:center;justify-content:space-between;padding-top:12px;border-top:1px solid var(--bd);flex-wrap:wrap;gap:10px}
+.r-verdict{display:flex;align-items:center;gap:8px}
+.verdict-badge{padding:3px 10px;border-radius:3px;font-size:12px;font-weight:500}
+.v-push{background:var(--green-dim);color:var(--green);border:1px solid var(--green-bd)}
+.v-hold{background:var(--red-dim);color:#ff5566;border:1px solid var(--red-bd)}
+.v-watch{background:var(--amber-dim);color:var(--amber);border:1px solid var(--amber-bd)}
+.r-reason{font-size:12px;color:var(--dim)}
+.r-actions{display:flex;gap:8px}
+
+/* Toast */
+.toast{position:fixed;bottom:24px;right:24px;background:var(--surface-2);border:1px solid var(--bd-strong);border-radius:8px;padding:11px 15px;font-size:13px;display:flex;align-items:center;gap:8px;opacity:0;transform:translateY(4px);transition:opacity .2s,transform .2s;z-index:100;max-width:320px}
+.toast.show{opacity:1;transform:translateY(0)}
+.toast-ok .ti{color:var(--green)}
+.toast-err .ti{color:#ff5566}
+.ti{font-size:15px}
+
+/* Spinner */
+@keyframes spin{to{transform:rotate(360deg)}}
+.spin{display:inline-block;animation:spin .75s linear infinite}
+
+/* Misc */
+.placeholder{padding:32px;text-align:center;color:var(--muted);font-size:13px}
+.empty-keys{padding:24px;text-align:center;color:var(--dim);font-size:13px;line-height:1.65}
+</style>
+</head>
+<body>
+
+<div class="overlay hidden" id="modal-overlay">
+  <div class="modal">
+    <div class="modal-logo">PODIUM 1 RACING</div>
+    <h2>Version Manager</h2>
+    <p class="modal-desc">Enter your API keys to get started. Both are saved in your browser's local storage and never leave your machine.</p>
+    <div class="field">
+      <label>Anthropic API key</label>
+      <input type="password" id="m-ant" placeholder="sk-ant-..." autocomplete="off">
+    </div>
+    <div class="field">
+      <label>GitHub personal access token</label>
+      <input type="password" id="m-gh" placeholder="ghp_..." autocomplete="off">
+      <div class="field-hint">Needs <code>repo</code> scope &nbsp;·&nbsp; <a href="https://github.com/settings/tokens/new?scopes=repo" target="_blank">Create one ↗</a></div>
+    </div>
+    <button class="btn btn-primary btn-full" onclick="saveModalKeys()">Save and continue</button>
+  </div>
+</div>
+
+<div class="toast" id="toast">
+  <span class="ti" id="toast-icon">✓</span>
+  <span id="toast-msg"></span>
+</div>
+
+<header>
+  <div class="logo">
+    <div class="logo-mark">P1</div>
+    <div>
+      <div class="logo-name">PitStop Version Manager</div>
+      <div class="logo-sub">PODIUM 1 RACING</div>
+    </div>
+  </div>
+  <div class="header-right">
+    <button class="btn btn-sm" onclick="toggleSettings()" id="settings-btn">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+      Settings
+    </button>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <div class="settings-panel hidden" id="settings-panel">
+    <div class="settings-title">API keys</div>
+    <div class="field" style="margin-bottom:12px">
+      <label>Anthropic API key</label>
+      <div class="settings-row">
+        <input type="password" id="s-ant" placeholder="sk-ant-..." autocomplete="off">
+        <button class="btn btn-sm" onclick="saveKey('ant')">Save</button>
+      </div>
+    </div>
+    <div class="field" style="margin-bottom:0">
+      <label>GitHub personal access token</label>
+      <div class="settings-row">
+        <input type="password" id="s-gh" placeholder="ghp_..." autocomplete="off">
+        <button class="btn btn-sm" onclick="saveKey('gh')">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="status-bar">
+    <div class="status-text" id="status-text">Loading fleet data...</div>
+    <button class="btn btn-sm" onclick="reload()">
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+      Reload
+    </button>
+  </div>
+
+  <div class="app-list" id="app-list">
+    <div class="placeholder"><span class="spin">↻</span> Fetching versions.json...</div>
+  </div>
+
+</div>
+
+<script>
+const REPO    = 'LebronDunks/pitstop-versions';
+const RAW_URL = `https://raw.githubusercontent.com/${REPO}/main/versions.json`;
+const GH_API  = `https://api.github.com/repos/${REPO}/contents/versions.json`;
+
+// ── State ─────────────────────────────────────────────────────────────────────
+const S = { data: null, sha: null, research: {}, loading: {}, expanded: null, sessionApproved: {} };
+
+// ── Keys ──────────────────────────────────────────────────────────────────────
+const getAnt = () => localStorage.getItem('p1_ant') || '';
+const getGH  = () => localStorage.getItem('p1_gh')  || '';
+const setAnt = v  => localStorage.setItem('p1_ant', v);
+const setGH  = v  => localStorage.setItem('p1_gh',  v);
+
+function saveModalKeys() {
+  const a = document.getElementById('m-ant').value.trim();
+  const g = document.getElementById('m-gh').value.trim();
+  if (!a || !g) { toast('Both keys are required', false); return; }
+  setAnt(a); setGH(g);
+  document.getElementById('modal-overlay').classList.add('hidden');
+  loadData();
+}
+
+function saveKey(which) {
+  const v = document.getElementById('s-' + which).value.trim();
+  if (!v) return;
+  which === 'ant' ? setAnt(v) : setGH(v);
+  toast(which === 'ant' ? 'Anthropic key saved' : 'GitHub token saved', true);
+}
+
+function toggleSettings() {
+  const p = document.getElementById('settings-panel');
+  p.classList.toggle('hidden');
+  if (!p.classList.contains('hidden')) {
+    document.getElementById('s-ant').value = getAnt() ? '••••••••••••' : '';
+    document.getElementById('s-gh').value  = getGH()  ? '••••••••••••' : '';
+  }
+}
+
+// ── Data ──────────────────────────────────────────────────────────────────────
+async function loadData() {
+  el('app-list').innerHTML = '<div class="placeholder"><span class="spin">↻</span> Fetching versions.json...</div>';
+  try {
+    const res  = await fetch(RAW_URL + '?nc=' + Date.now());
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    S.data = await res.json();
+    // Fetch SHA for writes if token available
+    if (getGH()) {
+      try {
+        const r = await fetch(GH_API, ghHeaders());
+        if (r.ok) { const d = await r.json(); S.sha = d.sha; }
+      } catch {}
+    }
+    render();
+  } catch(e) {
+    el('app-list').innerHTML = `<div class="placeholder" style="color:#ff5566">Failed to load versions.json — ${e.message}</div>`;
+    el('status-text').textContent = 'Load failed';
+  }
+}
+
+function reload() { S.research = {}; S.sessionApproved = {}; S.expanded = null; loadData(); }
+
+function ghHeaders() { return { headers: { Authorization: `token ${getGH()}`, Accept: 'application/vnd.github.v3+json' } }; }
+
+// ── Research ──────────────────────────────────────────────────────────────────
+async function research(key) {
+  if (S.loading[key]) return;
+  const comp = S.data.components[key];
+  if (!comp) return;
+  if (!getAnt()) { toast('Anthropic API key not set — open Settings', false); return; }
+
+  S.loading[key] = true;
+  S.expanded = key;
+  render();
+
+  try {
+    const prompt = `You are a sim racing software analyst for Podium 1 Racing, a high-end sim rig builder in Nashville. Research the latest release of "${comp.label}" for fleet safety. Currently approved version: ${comp.approved_version}.
+
+Search for: (1) the latest released version from the official source, (2) community feedback from r/simracing, iRacing forums, RaceDepartment, and ACC forums, (3) any FFB issues, crashes, or compatibility problems with iRacing, ACC, or AMS2.
+
+Return ONLY valid JSON with no markdown fences:
+{"latest_version":"x.x.x","version_changed":true,"release_notes":"brief summary of what changed","summary":"2-3 sentence overview of community reception","positives":["point 1","point 2"],"concerns":["concern 1"],"verdict":"PUSH","verdict_reason":"one sentence"}
+
+verdict must be PUSH (safe to deploy), HOLD (issues reported, wait), or WATCH (no major issues but monitor).`;
+
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': getAnt(),
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-calls': 'true'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6', max_tokens: 1024,
+        tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error?.message || 'API ' + res.status);
+    const text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('').trim();
+    const m = text.match(/\{[\s\S]*\}/);
+    S.research[key] = m ? JSON.parse(m[0]) : { summary: text || 'No result.', positives: [], concerns: [], verdict: 'WATCH', verdict_reason: 'Review manually', version_changed: false };
+  } catch(e) {
+    S.research[key] = { summary: 'Research failed: ' + e.message, positives: [], concerns: [], verdict: 'WATCH', verdict_reason: 'Could not complete — try again', version_changed: false };
+  } finally {
+    S.loading[key] = false;
+    render();
+  }
+}
+
+// ── Approve ───────────────────────────────────────────────────────────────────
+async function approve(key) {
+  if (!getGH()) { toast('GitHub token not set — open Settings', false); return; }
+  const comp = S.data.components[key];
+  const newVer = S.research[key]?.latest_version || comp.approved_version;
+
+  try {
+    // Refresh SHA right before write
+    const getRes = await fetch(GH_API, ghHeaders());
+    if (!getRes.ok) throw new Error('Could not fetch file SHA');
+    const fileData = await getRes.json();
+    const updated  = JSON.parse(atob(fileData.content.replace(/\s/g, '')));
+
+    updated.components[key].approved_version = newVer;
+    updated._meta.last_updated = new Date().toISOString().split('T')[0];
+    updated._meta.updated_by   = 'PitStop Version Manager';
+
+    const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(updated, null, 2))));
+    const putRes = await fetch(GH_API, {
+      method: 'PUT',
+      headers: { ...ghHeaders().headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: `Approve ${comp.label} v${newVer} for Podium 1 fleet`,
+        content: encoded,
+        sha: fileData.sha
+      })
+    });
+    if (!putRes.ok) { const err = await putRes.json(); throw new Error(err.message); }
+
+    S.sessionApproved[key] = newVer;
+    S.data.components[key].approved_version = newVer;
+    S.expanded = null;
+    toast(`${comp.label} v${newVer} approved — fleet updating`, true);
+    render();
+  } catch(e) {
+    toast('Approve failed: ' + e.message, false);
+  }
+}
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
+let _toastTimer;
+function toast(msg, ok) {
+  const t = document.getElementById('toast');
+  document.getElementById('toast-msg').textContent = msg;
+  document.getElementById('toast-icon').textContent = ok ? '✓' : '✕';
+  t.className = 'toast show ' + (ok ? 'toast-ok' : 'toast-err');
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => t.classList.remove('show'), 3800);
+}
+
+// ── Render ────────────────────────────────────────────────────────────────────
+const el = id => document.getElementById(id);
+
+function icon(type) {
+  const c = type === 'check' ? 'var(--green)' : 'var(--amber)';
+  const p = type === 'check'
+    ? '<path d="M20 6 9 17l-5-5"/>'
+    : '<path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>';
+  return `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="${c}" stroke-width="2.5">${p}</svg>`;
+}
+
+function render() {
+  if (!S.data) return;
+  const comps = S.data.components;
+  const keys  = Object.keys(comps).filter(k => k !== 'windows_update' && comps[k].approved_version);
+
+  const pending = keys.filter(k => {
+    const r = S.research[k];
+    return r && r.version_changed && r.latest_version !== comps[k].approved_version && !S.sessionApproved[k];
+  }).length;
+  const checked = Object.keys(S.research).length;
+
+  el('status-text').innerHTML = checked === 0
+    ? `<span style="color:var(--dim)">${keys.length} components — click Research to check any app</span>`
+    : pending > 0
+    ? `<span style="color:var(--amber)">${pending} update${pending>1?'s':''} pending approval</span> <span style="color:var(--muted)">· ${checked} checked</span>`
+    : `<span style="color:var(--green)">All researched apps up to date</span> <span style="color:var(--muted)">· ${checked} checked</span>`;
+
+  el('app-list').innerHTML = keys.map(key => {
+    const c       = comps[key];
+    const r       = S.research[key];
+    const isLoad  = S.loading[key];
+    const isExp   = S.expanded === key;
+    const isSessApproved = !!S.sessionApproved[key];
+    const hasUpdate = r && r.version_changed && r.latest_version && r.latest_version !== c.approved_version;
+
+    // Version line
+    let verHtml;
+    if (isSessApproved) {
+      verHtml = `<span class="approved-v">${S.sessionApproved[key]}</span>`;
+    } else if (hasUpdate) {
+      verHtml = `${c.approved_version}<span class="arrow">→</span><span class="new-v">${r.latest_version}</span>`;
+    } else {
+      verHtml = c.approved_version;
+    }
+
+    // Status badge
+    let badge;
+    if (isSessApproved)           badge = `<span class="badge badge-green">fleet approved</span>`;
+    else if (hasUpdate)           badge = `<span class="badge badge-amber">update available</span>`;
+    else if (r && !r.version_changed) badge = `<span class="badge badge-green">up to date</span>`;
+    else if (isLoad)              badge = `<span class="badge badge-muted"><span class="spin" style="font-size:10px">↻</span> checking...</span>`;
+    else                          badge = `<span class="badge badge-muted">not checked</span>`;
+
+    // Action button
+    const btnLabel = isLoad ? `<span class="spin" style="font-size:11px">↻</span> Searching...` : r ? 'Re-research' : 'Research';
+    const actionBtn = isSessApproved ? '' : `<button class="btn btn-sm" onclick="research('${key}')" ${isLoad?'disabled':''}>${btnLabel}</button>`;
+
+    // Research panel
+    let panel = '';
+    if (isExp) {
+      if (isLoad) {
+        panel = `<div class="research-panel"><div class="r-loading"><span class="spin">↻</span> Searching community forums for ${c.label} feedback...</div></div>`;
+      } else if (r) {
+        const vClass = {PUSH:'v-push',HOLD:'v-hold',WATCH:'v-watch'}[r.verdict] || 'v-watch';
+        const posRows = (r.positives||[]).map(p => `<div class="r-point">${icon('check')}<span>${p}</span></div>`).join('');
+        const conRows = (r.concerns||[]).map(p => `<div class="r-point">${icon('warn')}<span>${p}</span></div>`).join('');
+        const noteHtml = r.release_notes ? `<div style="font-size:12px;color:var(--dim);margin-bottom:12px;padding:8px 10px;background:rgba(255,252,246,.03);border-radius:4px;border-left:2px solid var(--bd-strong)">${r.release_notes}</div>` : '';
+        const showApprove = hasUpdate && !isSessApproved;
+        const appDisabled = r.verdict === 'HOLD' || isSessApproved;
+        const appLabel = isSessApproved ? 'Approved ✓' : r.verdict === 'HOLD' ? 'Hold — not safe to approve' : `Approve ${r.latest_version||''} for fleet`;
+        panel = `<div class="research-panel">
+          ${noteHtml}
+          <div class="r-summary">${r.summary}</div>
+          <div class="r-cols">
+            ${posRows ? `<div><div class="r-col-title pos">Positives</div>${posRows}</div>` : '<div></div>'}
+            ${conRows ? `<div><div class="r-col-title neg">Concerns</div>${conRows}</div>` : '<div></div>'}
+          </div>
+          <div class="r-footer">
+            <div class="r-verdict">
+              <span class="verdict-badge ${vClass}">${r.verdict}</span>
+              <span class="r-reason">${r.verdict_reason}</span>
+            </div>
+            <div class="r-actions">
+              <button class="btn btn-sm" onclick="S.expanded=null;render()">Dismiss</button>
+              ${showApprove ? `<button class="btn btn-sm ${!appDisabled?'btn-approve':''}" onclick="approve('${key}')" ${appDisabled?'disabled':''}>${appLabel}</button>` : ''}
+            </div>
+          </div>
+        </div>`;
+      }
+    }
+
+    return `<div class="app-row">
+      <div class="row-header">
+        <div class="app-info">
+          <div class="app-name">${c.label}${c.optional?'<span class="tag-optional">optional</span>':''}</div>
+          <div class="app-ver">${verHtml}</div>
+        </div>
+        <div class="row-actions">${badge}${actionBtn}</div>
+      </div>${panel}
+    </div>`;
+  }).join('');
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+(function init() {
+  if (!getAnt() || !getGH()) {
+    document.getElementById('modal-overlay').classList.remove('hidden');
+  } else {
+    loadData();
+  }
+})();
+</script>
+</body>
+</html>
