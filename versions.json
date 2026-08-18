@@ -22,7 +22,7 @@
     },
     "asetek_racehub": {
       "label": "Asetek RaceHub",
-      "approved_version": "4.4.7",
+      "approved_version": "4.5.0",
       "minimum_version": "4.4.7",
       "exe_name": "RaceHub™.exe",
       "install_path_hint": "C:\\Program Files\\Asetek SimSports\\RaceHub™\\Application Folder\\Build",
