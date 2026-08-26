@@ -8,7 +8,7 @@
   "components": {
     "nvidia_driver": {
       "label": "NVIDIA GPU Driver",
-      "approved_version": "610.62",
+      "approved_version": "616.56",
       "minimum_version": "610.62",
       "update_url": "https://www.nvidia.com/en-us/drivers/",
       "notes": "Approved after vetting for iRacing + ACC stability.",
