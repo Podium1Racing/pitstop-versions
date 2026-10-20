@@ -83,7 +83,7 @@
     "streamdeck": {
       "label": "Stream Deck",
       "optional": true,
-      "approved_version": "6.8.0",
+      "approved_version": "7.6.0",
       "minimum_version": "6.5.0",
       "exe_name": "StreamDeck.exe",
       "registry_key": "HKLM\\SOFTWARE\\Elgato Systems GmbH\\StreamDeck",
